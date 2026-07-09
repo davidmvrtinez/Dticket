@@ -51,7 +51,8 @@
   #summary b { display: inline-block; min-width: 84px; color: var(--sub); font-weight: 600; }
   .err { color: #ff453a !important; }
   #previewWrap { display: none; margin-top: 14px; }
-  #preview { width: 100%; border-radius: 12px; border: 1px solid var(--border); display: block; background: #fff; }
+  #previewWrap canvas { width: 100%; border-radius: 12px; border: 1px solid var(--border); display: block;
+                        background: #fff; margin-bottom: 10px; }
   .spinner { display: none; width: 22px; height: 22px; border: 3px solid var(--btn2);
              border-top-color: var(--accent); border-radius: 50%; margin: 12px auto 0;
              animation: spin .8s linear infinite; }
@@ -67,7 +68,7 @@
   <div class="spinner" id="spin"></div>
   <div id="status" role="status" aria-live="polite"></div>
   <div id="summary"></div>
-  <div id="previewWrap"><canvas id="preview"></canvas></div>
+  <div id="previewWrap"></div>
   <button id="dl" style="display:none">Save / Share D-Ticket</button>
   <button id="again" class="secondary" style="display:none">Process another order</button>
 </div>
@@ -95,18 +96,145 @@ function status(t, err) { const s = $("status"); s.textContent = t; s.className 
 
 async function showPreview(bytes) {
   try {
+    const wrap = $("previewWrap");
+    wrap.innerHTML = "";
     const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
-    const page = await pdf.getPage(1);
     const cw = Math.min(document.querySelector(".card").clientWidth - 40, 440);
-    const vp1 = page.getViewport({ scale: 1 });
-    const scale = (cw / vp1.width) * (window.devicePixelRatio || 2);
-    const vp = page.getViewport({ scale });
-    const cv = $("preview");
-    cv.width = vp.width; cv.height = vp.height;
-    cv.style.width = "100%";
-    await page.render({ canvasContext: cv.getContext("2d"), viewport: vp }).promise;
-    $("previewWrap").style.display = "block";
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const vp1 = page.getViewport({ scale: 1 });
+      const scale = (cw / vp1.width) * (window.devicePixelRatio || 2);
+      const vp = page.getViewport({ scale });
+      const cv = document.createElement("canvas");
+      cv.width = vp.width; cv.height = vp.height;
+      wrap.appendChild(cv);
+      await page.render({ canvasContext: cv.getContext("2d"), viewport: vp }).promise;
+    }
+    wrap.style.display = "block";
   } catch (e) { /* preview optional */ }
+}
+
+const LABELS = ["Name","Rep ID#","Agency Name, Address & Phone Number","Account Name","Hospital Account ID#",
+  "Billing Address","Shipping Address","Purchase Order #","Enovis Surgical Order #","Date",
+  "Surgeon (Last, First, MI)","Surgery Type","Patient ID","Surgery Notes","Revision Surgery",
+  "Revised Enovis Surgical Product","Non-Revision Product Complaint","Surgery Side","Subtotal","Total",
+  "First and Last Name","(or Loaner Set ID#)","Ship To Acct #","Ship Via","Address, City, State, Zip",
+  "Required Date","Hospital Authorized Signature","Printed Name","Sales Representative","Bill To",
+  "Surgery Information","Surgery Specific Info","Ship To / Restock Information"];
+const isLabel = s => LABELS.includes(s);
+const clean = v => (v === "-" || v === "–") ? "" : v;
+
+function groupRows(items) {
+  const rows = [];
+  for (const it of items.slice().sort((a,b) => b.y - a.y || a.x - b.x)) {
+    const r = rows.find(r => Math.abs(r.y - it.y) < 3.5);
+    if (r) r.items.push(it); else rows.push({ y: it.y, items: [it] });
+  }
+  rows.forEach(r => r.items.sort((a,b) => a.x - b.x));
+  return rows;
+}
+
+function makeLookups(items) {
+  const findLabel = txt => items.find(i => i.str === txt) || null;
+  function below(labelTxt, maxLines = 1, tolX = 95) {
+    const lab = findLabel(labelTxt);
+    if (!lab) return "";
+    const cands = items.filter(i => i.y < lab.y - 2 && i.y > lab.y - 60 &&
+                  i.x > lab.x - 8 && i.x < lab.x + tolX && !isLabel(i.str))
+                  .sort((a,b) => b.y - a.y);
+    const lines = [];
+    let lastY = null;
+    for (const c of cands) {
+      if (lastY !== null && Math.abs(c.y - lastY) > 3.5) { if (lines.length >= maxLines) break; lines.push(c.str); }
+      else if (lastY !== null) { lines[lines.length-1] += " " + c.str; }
+      else lines.push(c.str);
+      lastY = c.y;
+      if (lines.length > maxLines) { lines.pop(); break; }
+    }
+    return lines.join(" ").replace(/\s+/g," ").trim();
+  }
+  function rightOf(labelTxt) {
+    const labs = items.filter(i => i.str === labelTxt);
+    for (const lab of labs) {
+      const c = items.filter(i => Math.abs(i.y - lab.y) < 4 && i.x > lab.x + 5 && /^\$/.test(i.str))
+                     .sort((a,b) => a.x - b.x)[0];
+      if (c) return c.str;
+    }
+    return "";
+  }
+  return { findLabel, below, rightOf };
+}
+
+// parse the items table on one page; appends to cases[]
+function parseTable(rows, cases) {
+  const hdrRow = rows.find(r => r.items.some(i => i.str === "Part #") && r.items.some(i => i.str === "Lot #"));
+  if (!hdrRow) return;
+  const colX = {};
+  for (const h of ["Loaner","Part #","Lot #","Expiry","Description","Rstk","I/O","Qty","Unit Price","Extended Price"]) {
+    const c = hdrRow.items.find(i => i.str === h); if (c) colX[h] = c.x;
+  }
+  for (const r of rows) {
+    if (r.y >= hdrRow.y - 2) continue;
+    if (r.items.some(i => i.str === "Subtotal")) break;
+    const cells = {};
+    for (const it of r.items) {
+      let best = null, bd = 1e9;
+      for (const [h, hx] of Object.entries(colX)) {
+        const d = Math.abs(it.x - hx);
+        if (d < bd) { bd = d; best = h; }
+      }
+      if (bd < 55) cells[best] = (cells[best] ? cells[best] + " " : "") + it.str;
+    }
+    const cat = (cells["Part #"] || "").trim();
+    const loanerCell = !!(cells["Loaner"] && /yes|x|✓/i.test(cells["Loaner"])) || /^yes$/i.test((cells["Rstk"]||"").trim());
+    if (cat && cat !== "-") {
+      cases.push({
+        catalog: cat,
+        lot: clean((cells["Lot #"] || "").trim()),
+        unit_price: clean((cells["Unit Price"] || "").trim()),
+        hospital_price: "",
+        loaner: loanerCell
+      });
+    } else if (cases.length) {
+      // wrapped description row: price/lot/loaner flags may land here
+      const last = cases[cases.length - 1];
+      if (!last.unit_price && cells["Unit Price"]) last.unit_price = clean(cells["Unit Price"].trim());
+      if (!last.lot && cells["Lot #"]) last.lot = clean(cells["Lot #"].trim());
+      if (loanerCell) last.loaner = true;
+    }
+  }
+}
+
+async function extractSticker(page) {
+  try {
+    const ops = await page.getOperatorList();
+    const names = [];
+    for (let i = 0; i < ops.fnArray.length; i++)
+      if (ops.fnArray[i] === pdfjsLib.OPS.paintImageXObject) names.push(ops.argsArray[i][0]);
+    for (const name of names) {
+      const img = await new Promise(res => { try { page.objs.get(name, res); } catch(e) { res(null); } });
+      if (!img || !img.width) continue;
+      const ar = img.width / img.height;
+      if (img.width > 600 || ar > 4 || ar < 1.2) continue;   // skip the wide enovis logo
+      const cv = document.createElement("canvas");
+      cv.width = img.width; cv.height = img.height;
+      const ctx = cv.getContext("2d");
+      if (img.bitmap) {
+        ctx.drawImage(img.bitmap, 0, 0);
+      } else if (img.data && img.data.length === img.width * img.height * 4) {
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(img.data), img.width, img.height), 0, 0);
+      } else if (img.data && img.data.length === img.width * img.height * 3) {
+        const rgba = new Uint8ClampedArray(img.width * img.height * 4);
+        for (let p = 0, q = 0; p < img.data.length; p += 3, q += 4) {
+          rgba[q] = img.data[p]; rgba[q+1] = img.data[p+1]; rgba[q+2] = img.data[p+2]; rgba[q+3] = 255;
+        }
+        ctx.putImageData(new ImageData(rgba, img.width, img.height), 0, 0);
+      } else continue;
+      return await new Promise(res => cv.toBlob(b => { const fr = new FileReader();
+        fr.onload = () => res(new Uint8Array(fr.result)); fr.readAsArrayBuffer(b); }, "image/png"));
+    }
+  } catch (e) { /* sticker optional */ }
+  return null;
 }
 
 async function run(f) {
@@ -114,87 +242,39 @@ async function run(f) {
     status("Reading sales order…");
     const buf = await f.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
-    const page = await pdf.getPage(1);
 
-    // ---- collect positioned text ----
-    const tc = await page.getTextContent();
-    const items = tc.items.map(i => ({ str: i.str.trim(), x: i.transform[4], y: i.transform[5] }))
-                          .filter(i => i.str);
-    // group into rows by y
-    const rows = [];
-    for (const it of items.slice().sort((a,b) => b.y - a.y || a.x - b.x)) {
-      const r = rows.find(r => Math.abs(r.y - it.y) < 3.5);
-      if (r) { r.items.push(it); } else rows.push({ y: it.y, items: [it] });
-    }
-    rows.forEach(r => r.items.sort((a,b) => a.x - b.x));
-
-    const LABELS = ["Name","Rep ID#","Agency Name, Address & Phone Number","Account Name","Hospital Account ID#",
-      "Billing Address","Shipping Address","Purchase Order #","Enovis Surgical Order #","Date",
-      "Surgeon (Last, First, MI)","Surgery Type","Patient ID","Surgery Notes","Revision Surgery",
-      "Revised Enovis Surgical Product","Non-Revision Product Complaint","Surgery Side","Subtotal","Total",
-      "First and Last Name","(or Loaner Set ID#)","Ship To Acct #","Ship Via","Address, City, State, Zip",
-      "Required Date","Hospital Authorized Signature","Printed Name","Sales Representative","Bill To",
-      "Surgery Information","Surgery Specific Info","Ship To / Restock Information"];
-    const isLabel = s => LABELS.includes(s);
-
-    function findLabel(txt) {
-      for (const it of items) if (it.str === txt) return it;
-      return null;
-    }
-    // value(s) directly under a label, same column
-    function below(labelTxt, maxLines = 1, tolX = 95) {
-      const lab = findLabel(labelTxt);
-      if (!lab) return "";
-      const cands = items.filter(i => i.y < lab.y - 2 && i.y > lab.y - 60 &&
-                    i.x > lab.x - 8 && i.x < lab.x + tolX && !isLabel(i.str))
-                    .sort((a,b) => b.y - a.y);
-      const lines = [];
-      let lastY = null;
-      for (const c of cands) {
-        if (lastY !== null && Math.abs(c.y - lastY) > 3.5) { if (lines.length >= maxLines) break; lines.push(c.str); }
-        else if (lastY !== null) { lines[lines.length-1] += " " + c.str; }
-        else lines.push(c.str);
-        lastY = c.y;
-        if (lines.length > maxLines) { lines.pop(); break; }
-      }
-      return lines.join(" ").replace(/\s+/g," ").trim();
-    }
-    const clean = v => (v === "-" || v === "–") ? "" : v;
-
-    // ---- items table via column headers ----
-    const hdrRow = rows.find(r => r.items.some(i => i.str === "Part #") && r.items.some(i => i.str === "Lot #"));
+    let page1Items = null;
     const cases = [];
-    if (hdrRow) {
-      const colX = {};
-      for (const h of ["Loaner","Part #","Lot #","Expiry","Description","Rstk","I/O","Qty","Unit Price","Extended Price"]) {
-        const c = hdrRow.items.find(i => i.str === h); if (c) colX[h] = c.x;
-      }
-      for (const r of rows) {
-        if (r.y >= hdrRow.y - 2) continue;
-        if (r.items.some(i => i.str === "Subtotal")) break;
-        const cells = {};
-        for (const it of r.items) {
-          let best = null, bd = 1e9;
-          for (const [h, hx] of Object.entries(colX)) {
-            const d = Math.abs(it.x - hx);
-            if (d < bd) { bd = d; best = h; }
-          }
-          if (bd < 55) cells[best] = (cells[best] ? cells[best] + " " : "") + it.str;
-        }
-        const cat = (cells["Part #"] || "").trim();
-        if (cat && cat !== "-") {
-          cases.push({
-            catalog: cat,
-            lot: clean((cells["Lot #"] || "").trim()),
-            unit_price: clean((cells["Unit Price"] || "").trim()),
-            hospital_price: "",
-            loaner: !!(cells["Loaner"] && /yes|x|✓/i.test(cells["Loaner"])) || /^yes$/i.test((cells["Rstk"]||"").trim())
-          });
+    let totalStr = "", grandStr = "", bodyAll = "";
+    let stickerPng = null;
+
+    // ---- scan ALL pages ----
+    for (let p = 1; p <= pdf.numPages; p++) {
+      status("Reading page " + p + " of " + pdf.numPages + "…");
+      const page = await pdf.getPage(p);
+      const tc = await page.getTextContent();
+      const items = tc.items.map(i => ({ str: i.str.trim(), x: i.transform[4], y: i.transform[5] }))
+                            .filter(i => i.str);
+      if (p === 1) page1Items = items;
+      bodyAll += " " + items.map(i => i.str).join(" ");
+      parseTable(groupRows(items), cases);
+      const lk = makeLookups(items);
+      const st = lk.rightOf("Subtotal"); if (st) totalStr = st;
+      let gt = lk.rightOf("Total");
+      if (!gt) {
+        const totLab = items.filter(i => i.str === "Total").sort((a,b) => a.y - b.y)[0];
+        if (totLab) {
+          const c = items.filter(i => i.y < totLab.y + 4 && i.y > totLab.y - 40 && /^\$[\d,.]+$/.test(i.str))
+                         .sort((a,b) => b.y - a.y)[0];
+          if (c) gt = c.str;
         }
       }
+      if (gt) grandStr = gt;
+      if (!stickerPng) stickerPng = await extractSticker(page);
     }
 
-    // ---- fields ----
+    // ---- header fields from page 1 ----
+    const { below } = makeLookups(page1Items);
     const rawDate = below("Date");
     let surgery_date = rawDate;
     const m = rawDate.match(/([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})/);
@@ -208,7 +288,6 @@ async function run(f) {
     const patientRaw = below("Patient ID", 2, 150);
     const patientLast = (patientRaw.split(",")[0] || "").trim();
     const yn = v => /^y/i.test(v) ? "Y" : (/^n/i.test(v) ? "N" : "");
-    const bodyText = items.map(i => i.str).join(" ");
 
     const data = {
       ib_case: clean(below("Enovis Surgical Order #")),
@@ -225,78 +304,25 @@ async function run(f) {
       site: "SE216",
       notes: below("Surgery Type") ? "Surgery Type: " + below("Surgery Type") : "",
       items: cases,
-      total: clean(below("Subtotal") || (rows.find(r=>r.items.some(i=>i.str==="Subtotal"))||{items:[]}).items.map(i=>i.str).filter(s=>/^\$/.test(s))[0] || ""),
+      total: totalStr,
       freight: "",
-      grand_total: ""
+      grand_total: grandStr || totalStr
     };
-    // the account ID column can bleed into the hospital name — strip it
     if (data.hospital_code) data.hospital = data.hospital.replace(data.hospital_code, "").replace(/\s+/g, " ").trim();
-    // subtotal/total often sit to the RIGHT of their labels
-    function rightOf(labelTxt) {
-      const lab = findLabel(labelTxt); if (!lab) return "";
-      const c = items.filter(i => Math.abs(i.y - lab.y) < 4 && i.x > lab.x + 5 && /^\$/.test(i.str))
-                     .sort((a,b) => a.x - b.x)[0];
-      return c ? c.str : "";
-    }
-    data.total = data.total && /^\$/.test(data.total) ? data.total : rightOf("Subtotal");
-    const totLab = items.filter(i => i.str === "Total").sort((a,b) => a.y - b.y)[0];
-    if (totLab) {
-      const c = items.filter(i => i.y < totLab.y + 4 && i.y > totLab.y - 40 && /^\$[\d,.]+$/.test(i.str))
-                     .sort((a,b) => b.y - a.y)[0];
-      data.grand_total = c ? c.str : data.total;
-    } else data.grand_total = data.total;
-    if (/ARVIS/i.test(bodyText)) data.arvis_note = true;
-
-    // ---- patient sticker image ----
-    status("Extracting patient sticker…");
-    let stickerPng = null;
-    try {
-      const ops = await page.getOperatorList();
-      const names = [];
-      for (let i = 0; i < ops.fnArray.length; i++)
-        if (ops.fnArray[i] === pdfjsLib.OPS.paintImageXObject) names.push(ops.argsArray[i][0]);
-      for (const name of names) {
-        const img = await new Promise(res => { try { page.objs.get(name, res); } catch(e) { res(null); } });
-        if (!img || !img.width) continue;
-        const ar = img.width / img.height;
-        if (img.width > 600 || ar > 4 || ar < 1.2) continue;   // skip the wide enovis logo
-        const cv = document.createElement("canvas");
-        cv.width = img.width; cv.height = img.height;
-        const ctx = cv.getContext("2d");
-        if (img.bitmap) {                     // pdf.js may return an ImageBitmap
-          ctx.drawImage(img.bitmap, 0, 0);
-          stickerPng = await new Promise(res => cv.toBlob(b => { const fr = new FileReader();
-            fr.onload = () => res(new Uint8Array(fr.result)); fr.readAsArrayBuffer(b); }, "image/png"));
-          break;
-        }
-        if (!img.data) continue;
-        let idata;
-        if (img.data.length === img.width * img.height * 4) {
-          idata = new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
-        } else if (img.data.length === img.width * img.height * 3) {
-          const rgba = new Uint8ClampedArray(img.width * img.height * 4);
-          for (let p = 0, q = 0; p < img.data.length; p += 3, q += 4) {
-            rgba[q] = img.data[p]; rgba[q+1] = img.data[p+1]; rgba[q+2] = img.data[p+2]; rgba[q+3] = 255;
-          }
-          idata = new ImageData(rgba, img.width, img.height);
-        } else continue;
-        ctx.putImageData(idata, 0, 0);
-        stickerPng = await new Promise(res => cv.toBlob(b => { const fr = new FileReader();
-          fr.onload = () => res(new Uint8Array(fr.result)); fr.readAsArrayBuffer(b); }, "image/png"));
-        break;
-      }
-    } catch (e) { /* sticker optional */ }
+    if (/ARVIS/i.test(bodyAll)) data.arvis_note = true;
 
     status("Building d-ticket…");
     outBytes = await buildTicket(data, stickerPng);
     outName = "DT - " + (data.ib_case || "order") + (patientLast ? " " + patientLast : "") + ".pdf";
 
+    const pages = Math.max(1, Math.ceil(data.items.length / 12));
     const s = $("summary");
     s.style.display = "block";
     s.innerHTML = "<b>Order #</b>" + (data.ib_case||"—") + "<br><b>Hospital</b>" + (data.hospital||"—") +
       "<br><b>Surgeon</b>" + (data.surgeon||"—") + "<br><b>Date</b>" + (data.surgery_date||"—") +
-      "<br><b>Items</b>" + (data.items.map(i=>i.catalog).join(", ")||"—") +
+      "<br><b>Items</b>" + (data.items.length ? data.items.length + " — " + data.items.map(i=>i.catalog).join(", ") : "—") +
       "<br><b>Total</b>" + (data.grand_total||"—") +
+      "<br><b>Pages</b>" + pages +
       "<br><b>Sticker</b>" + (stickerPng ? "included" : "not found — apply physical sticker") +
       (data.arvis_note ? "<br><b style='color:#b00020'>ARVIS</b> mentioned on order — mark the ARVIS box manually" : "");
     status("Done. Review, then save.");
@@ -310,129 +336,150 @@ async function run(f) {
   }
 }
 
-// ================= D-TICKET LAYOUT (port of make_dticket.py) =================
-async function buildTicket(D, stickerPng) {
-  const doc = await PDFDocument.create();
-  const pg = doc.addPage([612, 792]);
-  const HB = await doc.embedFont(StandardFonts.HelveticaBold);
-  const HV = await doc.embedFont(StandardFonts.Helvetica);
-  const dark = rgb(0.102,0.102,0.102), greyC = rgb(0.4,0.4,0.4), lightC = rgb(0.91,0.91,0.91), whiteC = rgb(1,1,1);
+// ================= D-TICKET LAYOUT =================
+const W = 612, H = 792, M = 28.8;
+const LEFT_W = 154.8, GAP2 = 8.64, RIGHT_X = M + LEFT_W + GAP2, RIGHT_W = W - M - RIGHT_X;
+const PRICE_W = 108, LABEL_W = RIGHT_W - PRICE_W, TOP = H - M, BOT = M + 68.4;
 
-  const W = 612, H = 792, M = 28.8;
-  const LEFT_W = 154.8, GAP2 = 8.64, RIGHT_X = M + LEFT_W + GAP2, RIGHT_W = W - M - RIGHT_X;
-  const PRICE_W = 108, LABEL_W = RIGHT_W - PRICE_W, TOP = H - M, BOT = M + 68.4;
-
+function makeDraw(pg) {
+  const dark = rgb(0.102,0.102,0.102), greyC = rgb(0.4,0.4,0.4), lightC = rgb(0.91,0.91,0.91),
+        whiteC = rgb(1,1,1), ink = rgb(0,0,0);
   const line = (x1,y1,x2,y2,wd,col,dash) => pg.drawLine({ start:{x:x1,y:y1}, end:{x:x2,y:y2},
       thickness: wd, color: col, dashArray: dash });
   const rect = (x,y,w,h,opt) => pg.drawRectangle(Object.assign({x,y,width:w,height:h}, opt));
   const txt = (t,x,y,f,s,col) => pg.drawText(String(t), {x, y, font:f, size:s, color: col||dark});
   const ctr = (t,cx,y,f,s,col) => txt(t, cx - f.widthOfTextAtSize(String(t),s)/2, y, f, s, col);
   const rtx = (t,rx,y,f,s,col) => txt(t, rx - f.widthOfTextAtSize(String(t),s), y, f, s, col);
-  const ink = rgb(0,0,0);
-  const check = (x,y) => {   // vector checkmark
-    pg.drawLine({ start:{x:x, y:y+3.2}, end:{x:x+2.4, y:y+0.6}, thickness:1.3, color:ink });
-    pg.drawLine({ start:{x:x+2.4, y:y+0.6}, end:{x:x+6.6, y:y+7.4}, thickness:1.3, color:ink });
+  const check = (x,y) => {
+    line(x, y+3.2, x+2.4, y+0.6, 1.3, ink);
+    line(x+2.4, y+0.6, x+6.6, y+7.4, 1.3, ink);
   };
+  return { line, rect, txt, ctr, rtx, check, dark, greyC, lightC, whiteC, ink };
+}
 
-  // right header bar
+// header bar + column headers + 12-row sticker grid; returns grid bottom y
+function drawGrid(d, HB, HV, itemsChunk) {
   const bar_h = 16;
-  rect(RIGHT_X, TOP-bar_h, RIGHT_W, bar_h, {color: dark});
-  txt("PLACE LABEL BELOW OR PRINT NUMBER", RIGHT_X+4, TOP-bar_h+4.5, HB, 7.5, whiteC);
-  rtx("* PLEASE INDICATE LOANER ITEMS", RIGHT_X+RIGHT_W-4, TOP-bar_h+4.5, HB, 7.5, whiteC);
+  d.rect(RIGHT_X, TOP-bar_h, RIGHT_W, bar_h, {color: d.dark});
+  d.txt("PLACE LABEL BELOW OR PRINT NUMBER", RIGHT_X+4, TOP-bar_h+4.5, HB, 7.5, d.whiteC);
+  d.rtx("* PLEASE INDICATE LOANER ITEMS", RIGHT_X+RIGHT_W-4, TOP-bar_h+4.5, HB, 7.5, d.whiteC);
   const hdr_h = 13, hy = TOP - bar_h - hdr_h;
-  rect(RIGHT_X, hy, RIGHT_W, hdr_h, {color: lightC, borderColor: dark, borderWidth: 0.75});
-  txt("*", RIGHT_X+4, hy+3.5, HB, 7);
-  txt("Catalog Number", RIGHT_X+12, hy+3.5, HB, 7);
-  txt("Lot Number", RIGHT_X+LABEL_W/2+6, hy+3.5, HB, 7);
-  ctr("Unit Price", RIGHT_X+LABEL_W+PRICE_W*0.25, hy+3.5, HB, 7);
-  ctr("Hospital Price", RIGHT_X+LABEL_W+PRICE_W*0.75, hy+3.5, HB, 7);
-  line(RIGHT_X+LABEL_W, hy, RIGHT_X+LABEL_W, hy+hdr_h, 0.75, dark);
-  line(RIGHT_X+LABEL_W+PRICE_W/2, hy, RIGHT_X+LABEL_W+PRICE_W/2, hy+hdr_h, 0.75, dark);
+  d.rect(RIGHT_X, hy, RIGHT_W, hdr_h, {color: d.lightC, borderColor: d.dark, borderWidth: 0.75});
+  d.txt("*", RIGHT_X+4, hy+3.5, HB, 7);
+  d.txt("Catalog Number", RIGHT_X+12, hy+3.5, HB, 7);
+  d.txt("Lot Number", RIGHT_X+LABEL_W/2+6, hy+3.5, HB, 7);
+  d.ctr("Unit Price", RIGHT_X+LABEL_W+PRICE_W*0.25, hy+3.5, HB, 7);
+  d.ctr("Hospital Price", RIGHT_X+LABEL_W+PRICE_W*0.75, hy+3.5, HB, 7);
+  d.line(RIGHT_X+LABEL_W, hy, RIGHT_X+LABEL_W, hy+hdr_h, 0.75, d.dark);
+  d.line(RIGHT_X+LABEL_W+PRICE_W/2, hy, RIGHT_X+LABEL_W+PRICE_W/2, hy+hdr_h, 0.75, d.dark);
 
-  // sticker rows
   const rowsN = 12, grid_top = hy, grid_bot = BOT + 20, row_h = (grid_top-grid_bot)/rowsN;
-  const itemsArr = D.items || [];
   for (let i = 0; i < rowsN; i++) {
     const y = grid_top - (i+1)*row_h, pad = 2.5;
-    rect(RIGHT_X+pad, y+pad, LABEL_W-2*pad, row_h-2*pad, {borderColor: greyC, borderWidth: 0.75, borderDashArray:[2,2]});
-    line(RIGHT_X+LABEL_W/2, y+pad, RIGHT_X+LABEL_W/2, y+row_h-pad, 0.75, greyC, [2,2]);
-    rect(RIGHT_X+LABEL_W, y, PRICE_W/2, row_h, {borderColor: dark, borderWidth: 0.75});
-    rect(RIGHT_X+LABEL_W+PRICE_W/2, y, PRICE_W/2, row_h, {borderColor: dark, borderWidth: 0.75});
-    rect(RIGHT_X, y, LABEL_W, row_h, {borderColor: dark, borderWidth: 0.75});
-    if (i < itemsArr.length) {
-      const it = itemsArr[i], yy = y + row_h/2 - 3;
-      if (it.loaner) txt("*", RIGHT_X+5, yy, HB, 11, ink);
-      txt(it.catalog||"", RIGHT_X+14, yy, HV, 9, ink);
-      txt(it.lot||"", RIGHT_X+LABEL_W/2+8, yy, HV, 9, ink);
-      if (it.unit_price) ctr(it.unit_price, RIGHT_X+LABEL_W+PRICE_W*0.25, yy, HV, 8, ink);
+    d.rect(RIGHT_X+pad, y+pad, LABEL_W-2*pad, row_h-2*pad, {borderColor: d.greyC, borderWidth: 0.75, borderDashArray:[2,2]});
+    d.line(RIGHT_X+LABEL_W/2, y+pad, RIGHT_X+LABEL_W/2, y+row_h-pad, 0.75, d.greyC, [2,2]);
+    d.rect(RIGHT_X+LABEL_W, y, PRICE_W/2, row_h, {borderColor: d.dark, borderWidth: 0.75});
+    d.rect(RIGHT_X+LABEL_W+PRICE_W/2, y, PRICE_W/2, row_h, {borderColor: d.dark, borderWidth: 0.75});
+    d.rect(RIGHT_X, y, LABEL_W, row_h, {borderColor: d.dark, borderWidth: 0.75});
+    if (i < itemsChunk.length) {
+      const it = itemsChunk[i], yy = y + row_h/2 - 3;
+      if (it.loaner) d.txt("*", RIGHT_X+5, yy, HB, 11, d.ink);
+      d.txt(it.catalog||"", RIGHT_X+14, yy, HV, 9, d.ink);
+      d.txt(it.lot||"", RIGHT_X+LABEL_W/2+8, yy, HV, 9, d.ink);
+      if (it.unit_price) d.ctr(it.unit_price, RIGHT_X+LABEL_W+PRICE_W*0.25, yy, HV, 8, d.ink);
     }
   }
+  return grid_bot;
+}
+
+function drawBorder(d) {
+  const b = 15.84;
+  d.rect(b, b, W-2*b, H-2*b, {borderColor: d.dark, borderWidth: 2.5});
+}
+
+async function buildTicket(D, stickerPng) {
+  const doc = await PDFDocument.create();
+  const HB = await doc.embedFont(StandardFonts.HelveticaBold);
+  const HV = await doc.embedFont(StandardFonts.Helvetica);
+  const allItems = D.items || [];
+  const chunks = [];
+  const nChunks = Math.max(1, Math.ceil(allItems.length / 12));
+  for (let i = 0; i < nChunks; i++) chunks.push(allItems.slice(i*12, i*12+12));
+  const totalPages = chunks.length;
+
+  // ============ PAGE 1 ============
+  const pg = doc.addPage([W, H]);
+  const d = makeDraw(pg);
+  const grid_bot = drawGrid(d, HB, HV, chunks[0]);
 
   // totals
   const th = 14, tw = 208.8, tx = RIGHT_X + RIGHT_W - tw;
   [["TOTAL (ALL ITEMS)", D.total], ["FREIGHT/DELIVERY FEE", D.freight], ["GRAND TOTAL", D.grand_total]]
   .forEach(([lab, v], j) => {
     const yy = grid_bot - (j+1)*th;
-    if (j === 2) { rect(tx, yy, tw*0.55, th, {color: dark}); txt(lab, tx+4, yy+4, HB, 8, whiteC); }
-    else txt(lab, tx+4, yy+4, HB, 8);
-    rect(tx, yy, tw*0.55, th, {borderColor: dark, borderWidth: 0.75});
-    rect(tx+tw*0.55, yy, tw*0.45, th, {borderColor: dark, borderWidth: 0.75});
-    if (v) txt(v, tx+tw*0.55+6, yy+4, HV, 8, ink);
+    if (j === 2) { d.rect(tx, yy, tw*0.55, th, {color: d.dark}); d.txt(lab, tx+4, yy+4, HB, 8, d.whiteC); }
+    else d.txt(lab, tx+4, yy+4, HB, 8);
+    d.rect(tx, yy, tw*0.55, th, {borderColor: d.dark, borderWidth: 0.75});
+    d.rect(tx+tw*0.55, yy, tw*0.45, th, {borderColor: d.dark, borderWidth: 0.75});
+    if (v) d.txt(v, tx+tw*0.55+6, yy+4, HV, 8, d.ink);
   });
 
   // left sidebar
   const x = M; let y = TOP;
-  const hline = yy => line(x, yy, x+LEFT_W, yy, 0.5, greyC);
-  const blank = (x0,yy,x1) => line(x0, yy, x1, yy, 0.6, dark);
-  txt("DJO / Enovis", x, y-20, HB, 20); y -= 40;
-  txt("SALES ORDER FORM", x, y, HB, 12); y -= 44;
-  txt("IB Case #", x, y, HB, 10); blank(x+55, y-1, x+LEFT_W);
-  if (D.ib_case) txt(D.ib_case, x+60, y+1, HV, 9, ink);
+  const hline = yy => d.line(x, yy, x+LEFT_W, yy, 0.5, d.greyC);
+  const blank = (x0,yy,x1) => d.line(x0, yy, x1, yy, 0.6, d.dark);
+  d.txt("DJO / Enovis", x, y-20, HB, 20); y -= 40;
+  d.txt("SALES ORDER FORM", x, y, HB, 12);
+  if (totalPages > 1) d.txt("Page 1 of " + totalPages, x, y-12, HV, 8, d.greyC);
+  y -= 44;
+  d.txt("IB Case #", x, y, HB, 10); blank(x+55, y-1, x+LEFT_W);
+  if (D.ib_case) d.txt(D.ib_case, x+60, y+1, HV, 9, d.ink);
   y -= 14; hline(y); y -= 16;
-  txt("Hospital & Code", x, y, HB, 10);
+  d.txt("Hospital & Code", x, y, HB, 10);
   y -= 16; blank(x, y, x+LEFT_W);
-  if (D.hospital) txt(D.hospital.slice(0,42), x+2, y+2, HV, 7.5, ink);
+  if (D.hospital) d.txt(D.hospital.slice(0,42), x+2, y+2, HV, 7.5, d.ink);
   y -= 16; blank(x, y, x+LEFT_W);
-  if (D.hospital_code) txt(D.hospital_code, x+2, y+2, HV, 8, ink);
+  if (D.hospital_code) d.txt(D.hospital_code, x+2, y+2, HV, 8, d.ink);
   y -= 10; hline(y); y -= 16;
-  txt("Surgery Date", x, y, HB, 10); blank(x+75, y-1, x+LEFT_W);
-  if (D.surgery_date) txt(D.surgery_date, x+80, y+1, HV, 9, ink);
+  d.txt("Surgery Date", x, y, HB, 10); blank(x+75, y-1, x+LEFT_W);
+  if (D.surgery_date) d.txt(D.surgery_date, x+80, y+1, HV, 9, d.ink);
   y -= 12; hline(y); y -= 16;
 
   const optRow = (label, optsText, chosen, prefixes) => {
-    txt(label, x, y, HB, 10); txt(optsText, x+108, y, HB, 10);
+    d.txt(label, x, y, HB, 10); d.txt(optsText, x+108, y, HB, 10);
     if (chosen && prefixes[chosen] !== undefined)
-      check(x + 108 + HB.widthOfTextAtSize(prefixes[chosen], 10), y+1);
+      d.check(x + 108 + HB.widthOfTextAtSize(prefixes[chosen], 10), y+1);
   };
   optRow("Surgery Side", "L __   R __", D.side, {"L":"L ", "R":"L __   R "}); y -= 16;
   optRow("Revision Surgery", "Y __   N __", D.revision, {"Y":"Y ", "N":"Y __   N "}); y -= 16;
   optRow("Revised DJO Product", "Y __   N __", D.revised_product, {"Y":"Y ", "N":"Y __   N "});
   y -= 12; hline(y); y -= 16;
-  txt("PO NO", x, y, HB, 10); blank(x+40, y-1, x+LEFT_W);
-  if (D.po) txt(D.po, x+45, y+1, HV, 9, ink);
+  d.txt("PO NO", x, y, HB, 10); blank(x+40, y-1, x+LEFT_W);
+  if (D.po) d.txt(D.po, x+45, y+1, HV, 9, d.ink);
   y -= 12; hline(y); y -= 16;
-  txt("Surgeon Name", x, y, HB, 10); y -= 14; blank(x, y, x+LEFT_W);
-  if (D.surgeon) txt(D.surgeon, x+2, y+2, HV, 9, ink);
+  d.txt("Surgeon Name", x, y, HB, 10); y -= 14; blank(x, y, x+LEFT_W);
+  if (D.surgeon) d.txt(D.surgeon, x+2, y+2, HV, 9, d.ink);
   y -= 10; hline(y); y -= 16;
   [["Sales Rep", D.rep], ["Agency Name", D.agency], ["Site Number", D.site]].forEach(([lab, v]) => {
-    txt(lab, x, y, HB, 10); blank(x+70, y-1, x+LEFT_W);
-    if (v) txt(v, x+74, y+1, HV, 8, ink);
+    d.txt(lab, x, y, HB, 10); blank(x+70, y-1, x+LEFT_W);
+    if (v) d.txt(v, x+74, y+1, HV, 8, d.ink);
     y -= 15;
   });
   y -= 2; hline(y); y -= 16;
-  txt("NOTES:", x, y, HB, 10);
+  d.txt("NOTES:", x, y, HB, 10);
   for (let k = 0; k < 3; k++) { y -= 15; blank(x, y, x+LEFT_W);
-    if (k === 0 && D.notes) txt(D.notes.slice(0,44), x+2, y+2, HV, 8, ink); }
+    if (k === 0 && D.notes) d.txt(D.notes.slice(0,44), x+2, y+2, HV, 8, d.ink); }
   y -= 12; hline(y); y -= 18;
-  txt("PATIENT LABEL HERE", x, y, HB, 11); y -= 8;
+  d.txt("PATIENT LABEL HERE", x, y, HB, 11); y -= 8;
   const box_h = (y - (BOT + 34)) / 2 * 0.8;
-  rect(x, y-box_h, LEFT_W, box_h, {borderColor: greyC, borderWidth: 0.75, borderDashArray:[2,2]});
+  d.rect(x, y-box_h, LEFT_W, box_h, {borderColor: d.greyC, borderWidth: 0.75, borderDashArray:[2,2]});
+  let stickerImg = null;
   if (stickerPng) {
     try {
-      const img = await doc.embedPng(stickerPng);
-      const sc = Math.min((LEFT_W-6)/img.width, (box_h-6)/img.height);
-      pg.drawImage(img, { x: x + (LEFT_W - img.width*sc)/2, y: y - box_h + (box_h - img.height*sc)/2,
-                          width: img.width*sc, height: img.height*sc });
+      stickerImg = await doc.embedPng(stickerPng);
+      const sc = Math.min((LEFT_W-6)/stickerImg.width, (box_h-6)/stickerImg.height);
+      pg.drawImage(stickerImg, { x: x + (LEFT_W - stickerImg.width*sc)/2, y: y - box_h + (box_h - stickerImg.height*sc)/2,
+                          width: stickerImg.width*sc, height: stickerImg.height*sc });
     } catch(e) {}
   }
 
@@ -440,36 +487,68 @@ async function buildTicket(D, stickerPng) {
   const aw = LEFT_W, ahdr = 12, lab_h = 11, opt_h = 16;
   const ah = ahdr + 2*(lab_h + opt_h);
   const ay = y - box_h - 34 - ah, ax = x;
-  rect(ax, ay+ah-ahdr, aw, ahdr, {color: dark});
-  ctr("ARVIS USAGE FEE", ax+aw/2, ay+ah-9, HB, 7.5, whiteC);
-  rect(ax, ay, aw, ah, {borderColor: dark, borderWidth: 0.75});
+  d.rect(ax, ay+ah-ahdr, aw, ahdr, {color: d.dark});
+  d.ctr("ARVIS USAGE FEE", ax+aw/2, ay+ah-9, HB, 7.5, d.whiteC);
+  d.rect(ax, ay, aw, ah, {borderColor: d.dark, borderWidth: 0.75});
   let yy2 = ay + ah - ahdr;
   [["CHARGE FEE", ["Y","N"]], ["HIP, KNEE OR SHOULDER", ["H","K","S"]]].forEach(([label, opts]) => {
     yy2 -= lab_h;
-    rect(ax, yy2, aw, lab_h, {borderColor: dark, borderWidth: 0.75});
-    txt(label, ax+3, yy2+3, HB, 7);
+    d.rect(ax, yy2, aw, lab_h, {borderColor: d.dark, borderWidth: 0.75});
+    d.txt(label, ax+3, yy2+3, HB, 7);
     yy2 -= opt_h;
     const cell = aw / (2*opts.length);
     opts.forEach((opt, k) => {
       const xx = ax + k*2*cell;
-      rect(xx, yy2, cell, opt_h, {borderColor: dark, borderWidth: 0.75});
-      rect(xx+cell, yy2, cell, opt_h, {borderColor: dark, borderWidth: 0.75});
-      ctr(opt, xx+cell+cell/2, yy2+opt_h/2-3, HB, 8);
+      d.rect(xx, yy2, cell, opt_h, {borderColor: d.dark, borderWidth: 0.75});
+      d.rect(xx+cell, yy2, cell, opt_h, {borderColor: d.dark, borderWidth: 0.75});
+      d.ctr(opt, xx+cell+cell/2, yy2+opt_h/2-3, HB, 8);
     });
   });
 
   // nurse signature
   const sig_y = M + 30;
-  txt("Nurse Signature", x, sig_y, HB, 10);
+  d.txt("Nurse Signature", x, sig_y, HB, 10);
   blank(x+90, sig_y-1, RIGHT_X+LABEL_W);
 
   // footer
-  ctr("SEND PO's TO  –  DJOsurgicalonbase@enovis.com", W/2, M+12, HB, 11);
-  ctr("or fax to 888-838-3668", W/2, M, HB, 9);
+  d.ctr("SEND PO's TO  –  DJOsurgicalonbase@enovis.com", W/2, M+12, HB, 11);
+  d.ctr("or fax to 888-838-3668", W/2, M, HB, 9);
+  drawBorder(d);
 
-  // border
-  const b = 15.84;
-  rect(b, b, W-2*b, H-2*b, {borderColor: dark, borderWidth: 2.5});
+  // ============ CONTINUATION PAGES ============
+  for (let p = 1; p < totalPages; p++) {
+    const pg2 = doc.addPage([W, H]);
+    const d2 = makeDraw(pg2);
+    drawGrid(d2, HB, HV, chunks[p]);
+    let y2 = TOP;
+    d2.txt("DJO / Enovis", M, y2-20, HB, 20); y2 -= 40;
+    d2.txt("SALES ORDER FORM", M, y2, HB, 12);
+    d2.txt("(continued)  Page " + (p+1) + " of " + totalPages, M, y2-12, HV, 8, d2.greyC);
+    y2 -= 44;
+    d2.txt("IB Case #", M, y2, HB, 10);
+    d2.line(M+55, y2-1, M+LEFT_W, y2-1, 0.6, d2.dark);
+    if (D.ib_case) d2.txt(D.ib_case, M+60, y2+1, HV, 9, d2.ink);
+    y2 -= 22;
+    d2.txt("Surgeon Name", M, y2, HB, 10); y2 -= 14;
+    d2.line(M, y2, M+LEFT_W, y2, 0.6, d2.dark);
+    if (D.surgeon) d2.txt(D.surgeon, M+2, y2+2, HV, 9, d2.ink);
+    y2 -= 22;
+    d2.txt("Surgery Date", M, y2, HB, 10);
+    d2.line(M+75, y2-1, M+LEFT_W, y2-1, 0.6, d2.dark);
+    if (D.surgery_date) d2.txt(D.surgery_date, M+80, y2+1, HV, 9, d2.ink);
+    y2 -= 30;
+    d2.txt("PATIENT LABEL HERE", M, y2, HB, 11); y2 -= 8;
+    const bh2 = 70;
+    d2.rect(M, y2-bh2, LEFT_W, bh2, {borderColor: d2.greyC, borderWidth: 0.75, borderDashArray:[2,2]});
+    if (stickerImg) {
+      try {
+        const sc = Math.min((LEFT_W-6)/stickerImg.width, (bh2-6)/stickerImg.height);
+        pg2.drawImage(stickerImg, { x: M + (LEFT_W - stickerImg.width*sc)/2, y: y2 - bh2 + (bh2 - stickerImg.height*sc)/2,
+                            width: stickerImg.width*sc, height: stickerImg.height*sc });
+      } catch(e) {}
+    }
+    drawBorder(d2);
+  }
 
   return await doc.save();
 }
