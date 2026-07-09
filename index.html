@@ -263,6 +263,13 @@ async function run(f) {
         const cv = document.createElement("canvas");
         cv.width = img.width; cv.height = img.height;
         const ctx = cv.getContext("2d");
+        if (img.bitmap) {                     // pdf.js may return an ImageBitmap
+          ctx.drawImage(img.bitmap, 0, 0);
+          stickerPng = await new Promise(res => cv.toBlob(b => { const fr = new FileReader();
+            fr.onload = () => res(new Uint8Array(fr.result)); fr.readAsArrayBuffer(b); }, "image/png"));
+          break;
+        }
+        if (!img.data) continue;
         let idata;
         if (img.data.length === img.width * img.height * 4) {
           idata = new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
@@ -309,7 +316,6 @@ async function buildTicket(D, stickerPng) {
   const pg = doc.addPage([612, 792]);
   const HB = await doc.embedFont(StandardFonts.HelveticaBold);
   const HV = await doc.embedFont(StandardFonts.Helvetica);
-  const ZD = await doc.embedFont(StandardFonts.ZapfDingbats);
   const dark = rgb(0.102,0.102,0.102), greyC = rgb(0.4,0.4,0.4), lightC = rgb(0.91,0.91,0.91), whiteC = rgb(1,1,1);
 
   const W = 612, H = 792, M = 28.8;
@@ -322,8 +328,11 @@ async function buildTicket(D, stickerPng) {
   const txt = (t,x,y,f,s,col) => pg.drawText(String(t), {x, y, font:f, size:s, color: col||dark});
   const ctr = (t,cx,y,f,s,col) => txt(t, cx - f.widthOfTextAtSize(String(t),s)/2, y, f, s, col);
   const rtx = (t,rx,y,f,s,col) => txt(t, rx - f.widthOfTextAtSize(String(t),s), y, f, s, col);
-  const check = (x,y) => txt("4", x, y, ZD, 9, rgb(0,0,0));
   const ink = rgb(0,0,0);
+  const check = (x,y) => {   // vector checkmark
+    pg.drawLine({ start:{x:x, y:y+3.2}, end:{x:x+2.4, y:y+0.6}, thickness:1.3, color:ink });
+    pg.drawLine({ start:{x:x+2.4, y:y+0.6}, end:{x:x+6.6, y:y+7.4}, thickness:1.3, color:ink });
+  };
 
   // right header bar
   const bar_h = 16;
