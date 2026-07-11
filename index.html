@@ -176,6 +176,7 @@ function parseTable(rows, cases) {
   for (const r of rows) {
     if (r.y >= hdrRow.y - 2) continue;
     if (r.items.some(i => i.str === "Subtotal")) break;
+    if (r.items.some(i => isLabel(i.str))) break;   // reached the footer section
     const cells = {};
     for (const it of r.items) {
       let best = null, bd = 1e9;
@@ -187,7 +188,7 @@ function parseTable(rows, cases) {
     }
     const cat = (cells["Part #"] || "").trim();
     const loanerCell = !!(cells["Loaner"] && /yes|x|✓/i.test(cells["Loaner"])) || /^yes$/i.test((cells["Rstk"]||"").trim());
-    if (cat && cat !== "-") {
+    if (cat && cat !== "-" && /\d/.test(cat) && cat.length <= 24) {
       cases.push({
         catalog: cat,
         lot: clean((cells["Lot #"] || "").trim()),
