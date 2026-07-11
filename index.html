@@ -358,7 +358,8 @@ function makeDraw(pg) {
 }
 
 // header bar + column headers + 12-row sticker grid; returns grid bottom y
-function drawGrid(d, HB, HV, itemsChunk) {
+function drawGrid(d, HB, HV, itemsChunk, startIdx) {
+  startIdx = startIdx || 0;
   const bar_h = 16;
   d.rect(RIGHT_X, TOP-bar_h, RIGHT_W, bar_h, {color: d.dark});
   d.txt("PLACE LABEL BELOW OR PRINT NUMBER", RIGHT_X+4, TOP-bar_h+4.5, HB, 7.5, d.whiteC);
@@ -376,17 +377,22 @@ function drawGrid(d, HB, HV, itemsChunk) {
   const rowsN = 12, grid_top = hy, grid_bot = BOT + 20, row_h = (grid_top-grid_bot)/rowsN;
   for (let i = 0; i < rowsN; i++) {
     const y = grid_top - (i+1)*row_h, pad = 2.5;
-    d.rect(RIGHT_X+pad, y+pad, LABEL_W-2*pad, row_h-2*pad, {borderColor: d.greyC, borderWidth: 0.75, borderDashArray:[2,2]});
-    d.line(RIGHT_X+LABEL_W/2, y+pad, RIGHT_X+LABEL_W/2, y+row_h-pad, 0.75, d.greyC, [2,2]);
+    const hasItem = i < itemsChunk.length;
+    const strip = hasItem ? 9 : 0;   // thin reference strip at the top of filled rows
+    // empty dashed box for the PHYSICAL implant sticker
+    d.rect(RIGHT_X+pad, y+pad, LABEL_W-2*pad, row_h-2*pad-strip, {borderColor: d.greyC, borderWidth: 0.75, borderDashArray:[2,2]});
+    if (!hasItem) d.line(RIGHT_X+LABEL_W/2, y+pad, RIGHT_X+LABEL_W/2, y+row_h-pad, 0.75, d.greyC, [2,2]);
     d.rect(RIGHT_X+LABEL_W, y, PRICE_W/2, row_h, {borderColor: d.dark, borderWidth: 0.75});
     d.rect(RIGHT_X+LABEL_W+PRICE_W/2, y, PRICE_W/2, row_h, {borderColor: d.dark, borderWidth: 0.75});
     d.rect(RIGHT_X, y, LABEL_W, row_h, {borderColor: d.dark, borderWidth: 0.75});
-    if (i < itemsChunk.length) {
-      const it = itemsChunk[i], yy = y + row_h/2 - 3;
-      if (it.loaner) d.txt("*", RIGHT_X+5, yy, HB, 11, d.ink);
-      d.txt(it.catalog||"", RIGHT_X+14, yy, HV, 9, d.ink);
-      d.txt(it.lot||"", RIGHT_X+LABEL_W/2+8, yy, HV, 9, d.ink);
-      if (it.unit_price) d.ctr(it.unit_price, RIGHT_X+LABEL_W+PRICE_W*0.25, yy, HV, 8, d.ink);
+    if (hasItem) {
+      const it = itemsChunk[i];
+      // small reference line so you know which sticker goes in this row
+      let ref = (startIdx + i + 1) + ":  " + (it.catalog||"") + (it.lot ? "   Lot " + it.lot : "");
+      if (it.loaner) ref = "* " + ref;
+      d.txt(ref, RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
+      d.txt("PLACE STICKER BELOW", RIGHT_X+LABEL_W-88, y+row_h-7.5, HB, 5.5, d.greyC);
+      if (it.unit_price) d.ctr(it.unit_price, RIGHT_X+LABEL_W+PRICE_W*0.25, y+row_h/2-3, HV, 8, d.ink);
     }
   }
   return grid_bot;
@@ -410,7 +416,7 @@ async function buildTicket(D, stickerPng) {
   // ============ PAGE 1 ============
   const pg = doc.addPage([W, H]);
   const d = makeDraw(pg);
-  const grid_bot = drawGrid(d, HB, HV, chunks[0]);
+  const grid_bot = drawGrid(d, HB, HV, chunks[0], 0);
 
   // totals
   const th = 14, tw = 208.8, tx = RIGHT_X + RIGHT_W - tw;
@@ -519,7 +525,7 @@ async function buildTicket(D, stickerPng) {
   for (let p = 1; p < totalPages; p++) {
     const pg2 = doc.addPage([W, H]);
     const d2 = makeDraw(pg2);
-    drawGrid(d2, HB, HV, chunks[p]);
+    drawGrid(d2, HB, HV, chunks[p], p*12);
     let y2 = TOP;
     d2.txt("DJO / Enovis", M, y2-20, HB, 20); y2 -= 40;
     d2.txt("SALES ORDER FORM", M, y2, HB, 12);
