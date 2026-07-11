@@ -69,6 +69,20 @@
              border-top-color: var(--accent); border-radius: 50%; margin: 12px auto 0;
              animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* ---- crop modal ---- */
+  #cropModal { position: fixed; inset: 0; background: rgba(0,0,0,.92); display: none;
+               flex-direction: column; z-index: 100;
+               padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); }
+  #cropModal.open { display: flex; }
+  #cropTitle { color: #fff; font-size: 15px; font-weight: 600; text-align: center; padding: 6px 0 10px; }
+  #cropStage { position: relative; flex: 1; touch-action: none; overflow: hidden; }
+  #cropImg { position: absolute; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+  #cropRect { position: absolute; border: 2px solid #0a84ff; border-radius: 4px;
+              box-shadow: 0 0 0 9999px rgba(0,0,0,.55); cursor: move; }
+  #cropHandle { position: absolute; right: -16px; bottom: -16px; width: 32px; height: 32px;
+                border-radius: 50%; background: #0a84ff; border: 3px solid #fff; }
+  #cropBtns { display: flex; gap: 10px; padding-top: 12px; }
+  #cropBtns button { margin: 0; flex: 1; }
 </style>
 </head>
 <body>
@@ -84,6 +98,17 @@
   <div id="previewWrap"></div>
   <button id="dl" style="display:none">Save / Share D-Ticket</button>
   <button id="again" class="secondary" style="display:none">Process another order</button>
+</div>
+<div id="cropModal">
+  <div id="cropTitle">Crop the sticker</div>
+  <div id="cropStage">
+    <img id="cropImg">
+    <div id="cropRect"><div id="cropHandle"></div></div>
+  </div>
+  <div id="cropBtns">
+    <button class="secondary" id="cropCancel">Cancel</button>
+    <button id="cropOk">Use Crop</button>
+  </div>
 </div>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -289,29 +314,112 @@ function autoTrim(cv) {
   } catch (e) { return null; }
 }
 
+// aspect ratio of the sticker box on the d-ticket (crop is locked to this,
+// so the crop fills the row exactly)
+function boxAspect() {
+  const bar_h = 16, hdr_h = 13, pad = 2.5, strip = 9;
+  const grid_top = TOP - bar_h - hdr_h, grid_bot = BOT + 20, row_h = (grid_top - grid_bot) / 12;
+  const bw = LABEL_W - 2*pad - 4, bh = row_h - 2*pad - strip - 4;
+  return bw / bh;
+}
+
+// ---- manual crop modal ----
+function openCropper(srcCanvas, idx) {
+  return new Promise(resolve => {
+    const modal = $("cropModal"), stage = $("cropStage"), imgEl = $("cropImg"),
+          rect = $("cropRect"), handle = $("cropHandle");
+    $("cropTitle").textContent = "Crop sticker " + (idx+1) + " — " + (lastData.items[idx].catalog || "");
+    modal.classList.add("open");
+    const AR = boxAspect();
+    let iw, ih, ox, oy, scale;   // displayed image geometry
+    let r = { x: 0, y: 0, w: 0, h: 0 };
+
+    function layout() {
+      const sw = stage.clientWidth, sh = stage.clientHeight;
+      scale = Math.min(sw / srcCanvas.width, sh / srcCanvas.height);
+      iw = srcCanvas.width * scale; ih = srcCanvas.height * scale;
+      ox = (sw - iw) / 2; oy = (sh - ih) / 2;
+      imgEl.src = srcCanvas.toDataURL("image/jpeg", 0.8);
+      imgEl.style.left = ox + "px"; imgEl.style.top = oy + "px";
+      imgEl.style.width = iw + "px"; imgEl.style.height = ih + "px";
+      // initial crop: auto-detected region if available, else centered
+      const auto = autoTrim(srcCanvas);
+      if (auto) {
+        r.w = auto.w * scale; r.h = r.w / AR;
+        r.x = ox + auto.x * scale;
+        r.y = oy + (auto.y + auto.h/2) * scale - r.h/2;
+      } else {
+        r.w = iw * 0.9; r.h = r.w / AR;
+        if (r.h > ih * 0.9) { r.h = ih * 0.9; r.w = r.h * AR; }
+        r.x = ox + (iw - r.w)/2; r.y = oy + (ih - r.h)/2;
+      }
+      clampRect(); applyRect();
+    }
+    function clampRect() {
+      if (r.w > iw) { r.w = iw; r.h = r.w / AR; }
+      if (r.h > ih) { r.h = ih; r.w = r.h * AR; }
+      r.x = Math.min(Math.max(r.x, ox), ox + iw - r.w);
+      r.y = Math.min(Math.max(r.y, oy), oy + ih - r.h);
+    }
+    function applyRect() {
+      rect.style.left = r.x + "px"; rect.style.top = r.y + "px";
+      rect.style.width = r.w + "px"; rect.style.height = r.h + "px";
+    }
+    let mode = null, sx = 0, sy = 0, start = null;
+    function down(e, m) {
+      mode = m; sx = e.clientX; sy = e.clientY; start = { ...r };
+      e.preventDefault(); e.stopPropagation();
+    }
+    rect.addEventListener("pointerdown", e => { if (e.target === handle) return; down(e, "move"); });
+    handle.addEventListener("pointerdown", e => down(e, "resize"));
+    window.addEventListener("pointermove", e => {
+      if (!mode) return;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (mode === "move") { r.x = start.x + dx; r.y = start.y + dy; }
+      else {
+        const nw = Math.max(50, start.w + dx);
+        r.w = nw; r.h = nw / AR;
+      }
+      clampRect(); applyRect();
+    });
+    window.addEventListener("pointerup", () => { mode = null; });
+
+    function done(ok) {
+      modal.classList.remove("open");
+      if (!ok) { resolve(null); return; }
+      // map display rect -> source pixels
+      const sxp = (r.x - ox) / scale, syp = (r.y - oy) / scale;
+      const swp = r.w / scale, shp = r.h / scale;
+      const out = document.createElement("canvas");
+      out.width = Math.round(swp); out.height = Math.round(shp);
+      out.getContext("2d").drawImage(srcCanvas, sxp, syp, swp, shp, 0, 0, out.width, out.height);
+      resolve(out);
+    }
+    $("cropOk").onclick = () => done(true);
+    $("cropCancel").onclick = () => done(false);
+    requestAnimationFrame(layout);
+  });
+}
+
 async function processStickerPhoto(file, idx) {
   const url = URL.createObjectURL(file);
   const img = await new Promise((res, rej) => {
     const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url;
   });
-  // downscale to max 1000px
-  const sc = Math.min(1, 1000 / Math.max(img.width, img.height));
+  const sc = Math.min(1, 1400 / Math.max(img.width, img.height));
   const cv = document.createElement("canvas");
   cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
   cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
-  const box = autoTrim(cv);
-  let out = cv;
-  if (box && box.w * sc > 40 && box.h * sc > 20) {
-    out = document.createElement("canvas");
-    out.width = Math.round(box.w * sc); out.height = Math.round(box.h * sc);
-    out.getContext("2d").drawImage(cv, box.x*sc, box.y*sc, box.w*sc, box.h*sc, 0, 0, out.width, out.height);
-  }
   URL.revokeObjectURL(url);
+  const out = await openCropper(cv, idx);
+  if (!out) return false;   // cancelled
   const bytes = await new Promise(res => out.toBlob(b => {
     const fr = new FileReader(); fr.onload = () => res(new Uint8Array(fr.result));
     fr.readAsArrayBuffer(b); }, "image/jpeg", 0.85));
   lastData.items[idx].photo = bytes;
+  lastData.items[idx].fit = true;   // crop matches box aspect → fill exactly
   lastData.items[idx].photoUrl = out.toDataURL("image/jpeg", 0.6);
+  return true;
 }
 
 function renderStickerUI() {
@@ -333,9 +441,11 @@ function renderStickerUI() {
     inp.type = "file"; inp.accept = "image/*"; inp.style.display = "none";
     inp.addEventListener("change", async e => {
       if (!e.target.files[0]) return;
-      status("Adding sticker " + (idx+1) + "…");
       try {
-        await processStickerPhoto(e.target.files[0], idx);
+        const ok = await processStickerPhoto(e.target.files[0], idx);
+        e.target.value = "";
+        if (!ok) { status("Crop cancelled."); return; }
+        status("Placing sticker " + (idx+1) + "…");
         outBytes = await buildTicket(lastData, lastStickerPng);
         renderStickerUI();
         await showPreview(outBytes);
@@ -505,12 +615,17 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
       if (it.loaner) ref = "* " + ref;
       d.txt(ref, RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
       if (it.img) {
-        // sticker photo fitted inside the dashed box
+        // sticker photo inside the dashed box
         const bw = LABEL_W - 2*pad - 4, bh = row_h - 2*pad - strip - 4;
-        const sc2 = Math.min(bw / it.img.width, bh / it.img.height);
-        const iw = it.img.width * sc2, ih = it.img.height * sc2;
-        d.pg.drawImage(it.img, { x: RIGHT_X + pad + 2 + (bw - iw)/2,
-                                 y: y + pad + 2 + (bh - ih)/2, width: iw, height: ih });
+        if (it.fit) {
+          // manually cropped to the box aspect — fill the box exactly
+          d.pg.drawImage(it.img, { x: RIGHT_X + pad + 2, y: y + pad + 2, width: bw, height: bh });
+        } else {
+          const sc2 = Math.min(bw / it.img.width, bh / it.img.height);
+          const iw = it.img.width * sc2, ih = it.img.height * sc2;
+          d.pg.drawImage(it.img, { x: RIGHT_X + pad + 2 + (bw - iw)/2,
+                                   y: y + pad + 2 + (bh - ih)/2, width: iw, height: ih });
+        }
       } else {
         d.txt("PLACE STICKER BELOW", RIGHT_X+LABEL_W-88, y+row_h-7.5, HB, 5.5, d.greyC);
       }
