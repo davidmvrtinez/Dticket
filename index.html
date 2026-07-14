@@ -408,18 +408,58 @@ $("notesApply").onclick = async () => {
 };
 
 // ---- manual d-ticket ----
+async function fileToCanvas(file) {
+  const url = URL.createObjectURL(file);
+  const img = await new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url;
+  });
+  const sc = Math.min(1, 1400 / Math.max(img.width, img.height));
+  const cv = document.createElement("canvas");
+  cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
+  cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+  URL.revokeObjectURL(url);
+  return cv;
+}
+const canvasToJpeg = cv => new Promise(res => cv.toBlob(b => {
+  const fr = new FileReader(); fr.onload = () => res(new Uint8Array(fr.result));
+  fr.readAsArrayBuffer(b); }, "image/jpeg", 0.85));
+
 function mItemRow(pre) {
   pre = pre || {};
   const div = document.createElement("div");
   div.className = "mitem";
   div.innerHTML =
-    '<div class="fldrow"><div class="fld"><label>Catalog / REF</label><input class="mi-cat" value="' + (pre.catalog||"") + '"></div>' +
+    '<div class="strow" style="border:0;padding:0 0 8px">' +
+      '<div class="info"><b>Sticker photo</b><small>snap it and skip the typing below</small></div>' +
+      '<img class="thumb mi-thumb" style="display:none">' +
+      '<div class="thumb mi-thumbph"></div>' +
+      '<button type="button" class="camBtn mi-cam">📷 Photo</button>' +
+      '<input type="file" class="mi-file" accept="image/*" style="display:none">' +
+    '</div>' +
+    '<div class="fldrow"><div class="fld"><label>Catalog / REF (optional with photo)</label><input class="mi-cat" value="' + (pre.catalog||"") + '"></div>' +
     '<div class="fld"><label>Lot</label><input class="mi-lot" value="' + (pre.lot||"") + '"></div></div>' +
     '<div class="fldrow"><div class="fld"><label>Expiry</label><input class="mi-exp" value="' + (pre.expiry||"") + '"></div>' +
     '<div class="fld"><label>Unit Price</label><input class="mi-pr" placeholder="$" value="' + (pre.unit_price||"") + '"></div></div>' +
     '<div class="chk"><input type="checkbox" class="mi-lo"' + (pre.loaner ? " checked" : "") + '> Loaner item</div>' +
     '<button class="rm">Remove</button>';
   div.querySelector(".rm").onclick = () => div.remove();
+  const inp = div.querySelector(".mi-file");
+  div.querySelector(".mi-cam").onclick = (e) => { e.preventDefault(); inp.click(); };
+  inp.addEventListener("change", async e => {
+    if (!e.target.files[0]) return;
+    try {
+      const cv = await fileToCanvas(e.target.files[0]);
+      e.target.value = "";
+      const out = await openCropper(cv, "Crop the implant sticker");
+      if (!out) return;
+      div._photo = await canvasToJpeg(out);
+      const th = div.querySelector(".mi-thumb");
+      th.src = out.toDataURL("image/jpeg", 0.6);
+      th.style.display = "block";
+      div.querySelector(".mi-thumbph").style.display = "none";
+      div.querySelector(".mi-cam").textContent = "Retake";
+    } catch (err) { alert("Couldn't add that photo: " + err.message); }
+  });
   $("mItems").appendChild(div);
 }
 $("manualBtn").onclick = () => {
@@ -434,11 +474,17 @@ $("mGo").onclick = async () => {
   const items = [];
   document.querySelectorAll("#mItems .mitem").forEach(div => {
     const cat = div.querySelector(".mi-cat").value.trim();
-    if (!cat) return;
-    items.push({ catalog: cat, lot: div.querySelector(".mi-lot").value.trim(),
+    if (!cat && !div._photo) return;   // needs a photo or a catalog #
+    const it = { catalog: cat, lot: div.querySelector(".mi-lot").value.trim(),
       expiry: div.querySelector(".mi-exp").value.trim(),
       unit_price: div.querySelector(".mi-pr").value.trim(), hospital_price: "",
-      loaner: div.querySelector(".mi-lo").checked });
+      loaner: div.querySelector(".mi-lo").checked };
+    if (div._photo) {
+      it.photo = div._photo;
+      const th = div.querySelector(".mi-thumb");
+      if (th && th.src) it.photoUrl = th.src;
+    }
+    items.push(it);
   });
   const surg = $("mSurg").value.trim();
   lastData = {
@@ -530,8 +576,9 @@ function openCropper(srcCanvas, idx) {
   return new Promise(resolve => {
     const modal = $("cropModal"), stage = $("cropStage"), imgEl = $("cropImg"),
           rect = $("cropRect"), handle = $("cropHandle");
-    $("cropTitle").textContent = idx < 0 ? "Crop the patient sticker"
-      : "Crop sticker " + (idx+1) + " — " + (lastData.items[idx].catalog || "");
+    $("cropTitle").textContent = (typeof idx === "string") ? idx
+      : (idx < 0 ? "Crop the patient sticker"
+      : "Crop sticker " + (idx+1) + " — " + (lastData.items[idx].catalog || ""));
     modal.classList.add("open");
     const AR = boxAspect();
     let src = srcCanvas;
@@ -883,9 +930,11 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
         continue;
       }
       // reference line: row #, REF, LOT, EXP above the sticker area
-      let ref = (startIdx + i + 1) + ":  REF " + (it.catalog||"") +
-                (it.lot ? "   LOT " + it.lot : "") +
-                (it.expiry ? "   EXP " + it.expiry : "");
+      const parts = [];
+      if (it.catalog) parts.push("REF " + it.catalog);
+      if (it.lot) parts.push("LOT " + it.lot);
+      if (it.expiry) parts.push("EXP " + it.expiry);
+      let ref = (startIdx + i + 1) + (parts.length ? ":  " + parts.join("   ") : ":");
       if (it.loaner) ref = "* " + ref;
       d.txt(ref, RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
       if (it.img) {
