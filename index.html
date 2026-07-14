@@ -530,7 +530,8 @@ function openCropper(srcCanvas, idx) {
   return new Promise(resolve => {
     const modal = $("cropModal"), stage = $("cropStage"), imgEl = $("cropImg"),
           rect = $("cropRect"), handle = $("cropHandle");
-    $("cropTitle").textContent = "Crop sticker " + (idx+1) + " — " + (lastData.items[idx].catalog || "");
+    $("cropTitle").textContent = idx < 0 ? "Crop the patient sticker"
+      : "Crop sticker " + (idx+1) + " — " + (lastData.items[idx].catalog || "");
     modal.classList.add("open");
     const AR = boxAspect();
     let src = srcCanvas;
@@ -626,12 +627,59 @@ async function processStickerPhoto(file, idx) {
   return true;
 }
 
+async function processPatientPhoto(file) {
+  const url = URL.createObjectURL(file);
+  const img = await new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url;
+  });
+  const sc = Math.min(1, 1400 / Math.max(img.width, img.height));
+  const cv = document.createElement("canvas");
+  cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
+  cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+  URL.revokeObjectURL(url);
+  const out = await openCropper(cv, -1);
+  if (!out) return false;
+  lastStickerPng = await new Promise(res => out.toBlob(b => {
+    const fr = new FileReader(); fr.onload = () => res(new Uint8Array(fr.result));
+    fr.readAsArrayBuffer(b); }, "image/png"));
+  lastData.patientThumb = out.toDataURL("image/jpeg", 0.6);
+  return true;
+}
+
 function renderStickerUI() {
   const box = $("stickers");
-  if (!lastData || !lastData.items.length) { box.style.display = "none"; return; }
+  if (!lastData) { box.style.display = "none"; return; }
   box.style.display = "block";
-  box.innerHTML = '<div class="sthead">Implant sticker photos</div>' +
-    '<div class="stsub">Snap each sticker (or pick from your photos) and it’s placed in that row — no printing needed.</div>';
+  box.innerHTML = '<div class="sthead">Sticker photos</div>' +
+    '<div class="stsub">Snap each sticker (or pick from your photos) and it’s placed on the ticket — no printing needed.</div>';
+
+  // patient sticker row
+  const prow = document.createElement("div");
+  prow.className = "strow";
+  prow.innerHTML = '<div class="info">Patient label<small>' +
+    (lastStickerPng ? "sticker on ticket" : "no sticker yet") + '</small></div>' +
+    (lastData.patientThumb ? '<img class="thumb" src="' + lastData.patientThumb + '">' : '<div class="thumb"></div>');
+  const pbtn = document.createElement("button");
+  pbtn.className = "camBtn";
+  pbtn.textContent = lastStickerPng ? "Retake" : "📷 Photo";
+  const pinp = document.createElement("input");
+  pinp.type = "file"; pinp.accept = "image/*"; pinp.style.display = "none";
+  pinp.addEventListener("change", async e => {
+    if (!e.target.files[0]) return;
+    try {
+      const ok = await processPatientPhoto(e.target.files[0]);
+      e.target.value = "";
+      if (!ok) { status("Crop cancelled."); return; }
+      status("Placing patient sticker…");
+      outBytes = await buildTicket(lastData, lastStickerPng);
+      renderStickerUI();
+      await showPreview(outBytes);
+      status("Patient sticker placed.");
+    } catch (err) { status("Couldn't add that photo (" + err.message + ")", true); }
+  });
+  pbtn.onclick = () => pinp.click();
+  prow.appendChild(pbtn); prow.appendChild(pinp);
+  box.appendChild(prow);
   lastData.items.forEach((it, idx) => {
     const row = document.createElement("div");
     row.className = "strow";
@@ -955,7 +1003,8 @@ async function buildTicket(D, stickerPng) {
   let stickerImg = null;
   if (stickerPng) {
     try {
-      stickerImg = await doc.embedPng(stickerPng);
+      try { stickerImg = await doc.embedPng(stickerPng); }
+      catch (e) { stickerImg = await doc.embedJpg(stickerPng); }
       const sc = Math.min((LEFT_W-6)/stickerImg.width, (box_h-6)/stickerImg.height);
       pg.drawImage(stickerImg, { x: x + (LEFT_W - stickerImg.width*sc)/2, y: y - box_h + (box_h - stickerImg.height*sc)/2,
                           width: stickerImg.width*sc, height: stickerImg.height*sc });
