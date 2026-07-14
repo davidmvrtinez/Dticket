@@ -83,22 +83,96 @@
                 border-radius: 50%; background: #0a84ff; border: 3px solid #fff; }
   #cropBtns { display: flex; gap: 10px; padding-top: 12px; }
   #cropBtns button { margin: 0; flex: 1; }
+  .toprow { display: flex; align-items: flex-start; justify-content: space-between; }
+  #gear { flex: none; width: 40px; min-height: 40px; padding: 0; margin: 0; font-size: 20px;
+          background: var(--btn2); color: var(--text); border-radius: 12px; }
+  .fld { margin-bottom: 10px; }
+  .fld label { display: block; font-size: 12.5px; color: var(--sub); margin-bottom: 4px; font-weight: 600; }
+  .fld input, .fld select, .fld textarea { width: 100%; padding: 11px 12px; border-radius: 10px;
+        border: 1px solid var(--border); background: var(--panel); color: var(--text);
+        font-size: 16px; font-family: inherit; }
+  .fld textarea { min-height: 64px; resize: vertical; }
+  .fldrow { display: flex; gap: 8px; }
+  .fldrow .fld { flex: 1; }
+  #setModal, #manualModal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none;
+        z-index: 90; overflow-y: auto; padding: calc(20px + env(safe-area-inset-top)) 16px 30px; }
+  #setModal.open, #manualModal.open { display: block; }
+  .sheet { background: var(--card); border-radius: 18px; padding: 22px 18px; max-width: 480px; margin: 0 auto; }
+  .sheet h2 { font-size: 19px; margin-bottom: 14px; }
+  .mitem { border: 1px solid var(--border); border-radius: 12px; padding: 10px; margin-bottom: 10px; }
+  .mitem .fldrow .fld { margin-bottom: 6px; }
+  .mitem .rm { background: none; border: 0; color: #ff453a; font-size: 13px; font-weight: 600;
+               padding: 4px 0 0; margin: 0; width: auto; min-height: 0; cursor: pointer; }
+  .chk { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .chk input { width: auto; }
+  #notesWrap { display: none; margin-top: 14px; }
+  #startBtns { display: flex; gap: 10px; margin-top: 12px; }
+  #startBtns button { margin: 0; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>D-Ticket Generator</h1>
-  <div class="sub">DJO / Enovis Sales Order Form &middot; runs entirely on your device</div>
+  <div class="toprow">
+    <div>
+      <h1>D-Ticket Generator</h1>
+      <div class="sub">DJO / Enovis Sales Order Form &middot; runs entirely on your device</div>
+    </div>
+    <button id="gear" title="Settings">&#9881;</button>
+  </div>
   <label class="drop" id="drop" for="file"><span class="big">&#128196;</span>Tap to choose the sales order PDF<br><small>(Enovis Surgical / ImplantBase order)</small></label>
+  <div id="startBtns"><button class="secondary" id="manualBtn">&#9998; Create d-ticket manually</button></div>
   <input type="file" id="file" accept="application/pdf">
   <div class="spinner" id="spin"></div>
   <div id="status" role="status" aria-live="polite"></div>
   <div id="summary"></div>
+  <div id="notesWrap"><div class="fld"><label>Notes (printed on the d-ticket)</label>
+    <textarea id="notesBox"></textarea></div>
+    <button class="secondary" id="notesApply" style="margin-top:0">Apply notes</button></div>
   <div id="stickers"></div>
   <div id="previewWrap"></div>
   <button id="dl" style="display:none">Save / Share D-Ticket</button>
   <button id="again" class="secondary" style="display:none">Process another order</button>
 </div>
+
+<div id="setModal"><div class="sheet">
+  <h2>Settings</h2>
+  <div class="fld"><label>Agency Name</label><input id="setAgency"></div>
+  <div class="fld"><label>Site Number</label><input id="setSite"></div>
+  <div class="fld"><label>Default Sales Rep (used if the order has none)</label><input id="setRep"></div>
+  <button id="setSave">Save</button>
+  <button class="secondary" id="setCancel">Cancel</button>
+</div></div>
+
+<div id="manualModal"><div class="sheet">
+  <h2>Manual D-Ticket</h2>
+  <div class="fldrow">
+    <div class="fld"><label>IB Case #</label><input id="mCase"></div>
+    <div class="fld"><label>Surgery Date</label><input id="mDate" placeholder="MM/DD/YYYY"></div>
+  </div>
+  <div class="fld"><label>Hospital</label><input id="mHosp"></div>
+  <div class="fldrow">
+    <div class="fld"><label>Hospital Code</label><input id="mCode"></div>
+    <div class="fld"><label>PO #</label><input id="mPo"></div>
+  </div>
+  <div class="fldrow">
+    <div class="fld"><label>Surgeon (last name)</label><input id="mSurg" placeholder="e.g. Feiner"></div>
+    <div class="fld"><label>Patient last name</label><input id="mPat"></div>
+  </div>
+  <div class="fldrow">
+    <div class="fld"><label>Side</label><select id="mSide"><option value=""></option><option>L</option><option>R</option></select></div>
+    <div class="fld"><label>Revision</label><select id="mRev"><option value=""></option><option>Y</option><option>N</option></select></div>
+    <div class="fld"><label>Revised DJO</label><select id="mRevP"><option value=""></option><option>Y</option><option>N</option></select></div>
+  </div>
+  <div class="fld"><label>Notes</label><textarea id="mNotes"></textarea></div>
+  <div class="fld"><label>Items</label><div id="mItems"></div>
+  <button class="secondary" id="mAdd" style="margin-top:0">+ Add item</button></div>
+  <div class="fldrow">
+    <div class="fld"><label>Total</label><input id="mTotal" placeholder="$"></div>
+    <div class="fld"><label>Grand Total</label><input id="mGrand" placeholder="$"></div>
+  </div>
+  <button id="mGo">Generate D-Ticket</button>
+  <button class="secondary" id="mCancel">Cancel</button>
+</div></div>
 <div id="cropModal">
   <div id="cropTitle">Crop the sticker</div>
   <div id="cropStage">
@@ -226,21 +300,38 @@ function parseTable(rows, cases) {
       if (bd < 55) cells[best] = (cells[best] ? cells[best] + " " : "") + it.str;
     }
     const cat = (cells["Part #"] || "").trim();
+    const desc = (cells["Description"] || "").trim();
+    const expiry = clean((cells["Expiry"] || "").trim());
+    const extended = clean((cells["Extended Price"] || "").trim());
     const loanerCell = !!(cells["Loaner"] && /yes|x|✓/i.test(cells["Loaner"])) || /^yes$/i.test((cells["Rstk"]||"").trim());
-    if (cat && cat !== "-" && /\d/.test(cat) && cat.length <= 24) {
+    if (/construct/i.test(desc) || /construct/i.test(cat)) {
+      cases.push({
+        construct: true,
+        catalog: ((desc || cat).replace(/\s+/g, " ").trim()),
+        unit_price: extended || clean((cells["Unit Price"] || "").trim()),
+        hospital_price: ""
+      });
+    } else if (cat && cat !== "-" && /\d/.test(cat) && cat.length <= 24) {
       cases.push({
         catalog: cat,
         lot: clean((cells["Lot #"] || "").trim()),
+        expiry: expiry,
         unit_price: clean((cells["Unit Price"] || "").trim()),
         hospital_price: "",
         loaner: loanerCell
       });
     } else if (cases.length) {
-      // wrapped description row: price/lot/loaner flags may land here
+      // wrapped description row: fields may land here
       const last = cases[cases.length - 1];
-      if (!last.unit_price && cells["Unit Price"]) last.unit_price = clean(cells["Unit Price"].trim());
-      if (!last.lot && cells["Lot #"]) last.lot = clean(cells["Lot #"].trim());
-      if (loanerCell) last.loaner = true;
+      if (last.construct) {
+        if (desc) last.catalog = (last.catalog + " " + desc).replace(/\s+/g, " ").trim();
+        if (!last.unit_price && (extended || cells["Unit Price"])) last.unit_price = extended || clean(cells["Unit Price"].trim());
+      } else {
+        if (!last.unit_price && cells["Unit Price"]) last.unit_price = clean(cells["Unit Price"].trim());
+        if (!last.lot && cells["Lot #"]) last.lot = clean(cells["Lot #"].trim());
+        if (!last.expiry && expiry) last.expiry = expiry;
+        if (loanerCell) last.loaner = true;
+      }
     }
   }
 }
@@ -276,6 +367,106 @@ async function extractSticker(page) {
   } catch (e) { /* sticker optional */ }
   return null;
 }
+
+// ---- settings ----
+function getSettings() {
+  return {
+    agency: localStorage.getItem("dt_agency") || "FLT Ortho",
+    site: localStorage.getItem("dt_site") || "SE216",
+    rep: localStorage.getItem("dt_rep") || "David Martinez"
+  };
+}
+$("gear").onclick = () => {
+  const s = getSettings();
+  $("setAgency").value = s.agency; $("setSite").value = s.site; $("setRep").value = s.rep;
+  $("setModal").classList.add("open");
+};
+$("setCancel").onclick = () => $("setModal").classList.remove("open");
+$("setSave").onclick = async () => {
+  localStorage.setItem("dt_agency", $("setAgency").value.trim());
+  localStorage.setItem("dt_site", $("setSite").value.trim());
+  localStorage.setItem("dt_rep", $("setRep").value.trim());
+  $("setModal").classList.remove("open");
+  if (lastData) {   // re-apply to the current ticket
+    const s = getSettings();
+    lastData.agency = s.agency; lastData.site = s.site;
+    if (!lastData.repFromOrder) lastData.rep = s.rep;
+    outBytes = await buildTicket(lastData, lastStickerPng);
+    await showPreview(outBytes);
+  }
+  status("Settings saved.");
+};
+
+// ---- notes editor ----
+$("notesApply").onclick = async () => {
+  if (!lastData) return;
+  lastData.notes = $("notesBox").value.trim();
+  status("Updating notes…");
+  outBytes = await buildTicket(lastData, lastStickerPng);
+  await showPreview(outBytes);
+  status("Notes updated.");
+};
+
+// ---- manual d-ticket ----
+function mItemRow(pre) {
+  pre = pre || {};
+  const div = document.createElement("div");
+  div.className = "mitem";
+  div.innerHTML =
+    '<div class="fldrow"><div class="fld"><label>Catalog / REF</label><input class="mi-cat" value="' + (pre.catalog||"") + '"></div>' +
+    '<div class="fld"><label>Lot</label><input class="mi-lot" value="' + (pre.lot||"") + '"></div></div>' +
+    '<div class="fldrow"><div class="fld"><label>Expiry</label><input class="mi-exp" value="' + (pre.expiry||"") + '"></div>' +
+    '<div class="fld"><label>Unit Price</label><input class="mi-pr" placeholder="$" value="' + (pre.unit_price||"") + '"></div></div>' +
+    '<div class="chk"><input type="checkbox" class="mi-lo"' + (pre.loaner ? " checked" : "") + '> Loaner item</div>' +
+    '<button class="rm">Remove</button>';
+  div.querySelector(".rm").onclick = () => div.remove();
+  $("mItems").appendChild(div);
+}
+$("manualBtn").onclick = () => {
+  $("mItems").innerHTML = "";
+  mItemRow();
+  $("manualModal").classList.add("open");
+};
+$("mCancel").onclick = () => $("manualModal").classList.remove("open");
+$("mAdd").onclick = () => mItemRow();
+$("mGo").onclick = async () => {
+  const S = getSettings();
+  const items = [];
+  document.querySelectorAll("#mItems .mitem").forEach(div => {
+    const cat = div.querySelector(".mi-cat").value.trim();
+    if (!cat) return;
+    items.push({ catalog: cat, lot: div.querySelector(".mi-lot").value.trim(),
+      expiry: div.querySelector(".mi-exp").value.trim(),
+      unit_price: div.querySelector(".mi-pr").value.trim(), hospital_price: "",
+      loaner: div.querySelector(".mi-lo").checked });
+  });
+  const surg = $("mSurg").value.trim();
+  lastData = {
+    ib_case: $("mCase").value.trim(), hospital: $("mHosp").value.trim(),
+    hospital_code: $("mCode").value.trim(), surgery_date: $("mDate").value.trim(),
+    side: $("mSide").value, revision: $("mRev").value, revised_product: $("mRevP").value,
+    po: $("mPo").value.trim(),
+    surgeon: surg ? (/^dr/i.test(surg) ? surg : "Dr. " + surg) : "",
+    rep: S.rep, agency: S.agency, site: S.site,
+    notes: $("mNotes").value.trim(), items,
+    total: $("mTotal").value.trim(), freight: "",
+    grand_total: $("mGrand").value.trim() || $("mTotal").value.trim()
+  };
+  lastStickerPng = null;
+  lastPatientLast = $("mPat").value.trim();
+  $("manualModal").classList.remove("open");
+  status("Building d-ticket…");
+  outBytes = await buildTicket(lastData, null);
+  outName = "DT - " + (lastData.ib_case || "manual") + (lastPatientLast ? " " + lastPatientLast : "") + ".pdf";
+  $("notesBox").value = lastData.notes; $("notesWrap").style.display = "block";
+  renderStickerUI();
+  status("Done. Review, then save.");
+  $("dl").style.display = "block";
+  $("again").style.display = "block";
+  $("drop").style.display = "none";
+  $("startBtns").style.display = "none";
+  await showPreview(outBytes);
+};
 
 // ---- sticker photo handling ----
 let lastData = null, lastStickerPng = null, lastPatientLast = "";
@@ -444,8 +635,14 @@ function renderStickerUI() {
   lastData.items.forEach((it, idx) => {
     const row = document.createElement("div");
     row.className = "strow";
+    if (it.construct) {
+      row.innerHTML = '<div class="info">' + (idx+1) + ': ' + (it.catalog||"Construct") +
+        '<small>Construct — no sticker needed' + (it.unit_price ? ' · ' + it.unit_price : '') + '</small></div>';
+      box.appendChild(row);
+      return;
+    }
     row.innerHTML = '<div class="info">' + (idx+1) + ': ' + (it.catalog||"") +
-      (it.lot ? '<small>Lot ' + it.lot + '</small>' : '') + '</div>' +
+      '<small>' + (it.lot ? 'Lot ' + it.lot : '') + (it.expiry ? '  ·  Exp ' + it.expiry : '') + '</small></div>' +
       (it.photoUrl ? '<img class="thumb" src="' + it.photoUrl + '">' : '<div class="thumb"></div>');
     const btn = document.createElement("button");
     btn.className = "camBtn";
@@ -522,6 +719,8 @@ async function run(f) {
     const patientRaw = below("Patient ID", 2, 150);
     const patientLast = (patientRaw.split(",")[0] || "").trim();
     const yn = v => /^y/i.test(v) ? "Y" : (/^n/i.test(v) ? "N" : "");
+    const S = getSettings();
+    const repFromOrder = clean(below("Name"));   // Sales Representative → Name
 
     const data = {
       ib_case: clean(below("Enovis Surgical Order #")),
@@ -533,9 +732,10 @@ async function run(f) {
       revised_product: yn(below("Revised Enovis Surgical Product")),
       po: clean(below("Purchase Order #")),
       surgeon,
-      rep: "David Martinez",
-      agency: "FLT Ortho",
-      site: "SE216",
+      rep: repFromOrder || S.rep,
+      repFromOrder: !!repFromOrder,
+      agency: S.agency,
+      site: S.site,
       notes: below("Surgery Type") ? "Surgery Type: " + below("Surgery Type") : "",
       items: cases,
       total: totalStr,
@@ -561,10 +761,13 @@ async function run(f) {
       "<br><b>Pages</b>" + pages +
       "<br><b>Sticker</b>" + (stickerPng ? "included" : "not found — apply physical sticker") +
       (data.arvis_note ? "<br><b style='color:#b00020'>ARVIS</b> mentioned on order — mark the ARVIS box manually" : "");
+    $("notesBox").value = data.notes || "";
+    $("notesWrap").style.display = "block";
     status("Done. Review, then save.");
     $("dl").style.display = "block";
     $("again").style.display = "block";
     $("drop").style.display = "none";
+    $("startBtns").style.display = "none";
     await showPreview(outBytes);
   } catch (e) {
     console.error(e);
@@ -623,8 +826,18 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
     d.rect(RIGHT_X, y, LABEL_W, row_h, {borderColor: d.dark, borderWidth: 0.75});
     if (hasItem) {
       const it = itemsChunk[i];
-      // small reference line so you know which sticker goes in this row
-      let ref = (startIdx + i + 1) + ":  " + (it.catalog||"") + (it.lot ? "   Lot " + it.lot : "");
+      if (it.construct) {
+        // construct row: name + total price, no sticker needed
+        d.txt((startIdx + i + 1) + ":  CONSTRUCT", RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
+        const nm = (it.catalog || "CONSTRUCT").slice(0, 64);
+        d.ctr(nm, RIGHT_X + LABEL_W/2, y + (row_h - strip)/2 - 3, HB, 8, d.ink);
+        if (it.unit_price) d.ctr(it.unit_price, RIGHT_X+LABEL_W+PRICE_W*0.25, y+row_h/2-3, HV, 8, d.ink);
+        continue;
+      }
+      // reference line: row #, REF, LOT, EXP above the sticker area
+      let ref = (startIdx + i + 1) + ":  REF " + (it.catalog||"") +
+                (it.lot ? "   LOT " + it.lot : "") +
+                (it.expiry ? "   EXP " + it.expiry : "");
       if (it.loaner) ref = "* " + ref;
       d.txt(ref, RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
       if (it.img) {
@@ -723,8 +936,18 @@ async function buildTicket(D, stickerPng) {
   });
   y -= 2; hline(y); y -= 16;
   d.txt("NOTES:", x, y, HB, 10);
+  const noteLines = [];
+  if (D.notes) {
+    let cur = "";
+    for (const w of D.notes.split(/\s+/)) {
+      if ((cur + " " + w).trim().length > 42) { noteLines.push(cur.trim()); cur = w; }
+      else cur += " " + w;
+      if (noteLines.length >= 3) break;
+    }
+    if (cur.trim() && noteLines.length < 3) noteLines.push(cur.trim());
+  }
   for (let k = 0; k < 3; k++) { y -= 15; blank(x, y, x+LEFT_W);
-    if (k === 0 && D.notes) d.txt(D.notes.slice(0,44), x+2, y+2, HV, 8, d.ink); }
+    if (noteLines[k]) d.txt(noteLines[k], x+2, y+2, HV, 8, d.ink); }
   y -= 12; hline(y); y -= 18;
   d.txt("PATIENT LABEL HERE", x, y, HB, 11); y -= 8;
   const box_h = (y - (BOT + 34)) / 2 * 0.8;
