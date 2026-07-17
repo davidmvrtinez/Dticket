@@ -12,6 +12,8 @@
 <title>D-Ticket Generator</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -134,6 +136,18 @@
   <button id="again" class="secondary" style="display:none">Process another order</button>
 </div>
 
+<div id="lockModal" style="position:fixed;inset:0;background:var(--bg);z-index:200;display:none;
+     padding:calc(60px + env(safe-area-inset-top)) 16px 30px;">
+  <div class="sheet">
+    <h2>&#128274; Sign in</h2>
+    <div class="stsub" style="margin-bottom:12px">D-Ticket Generator is subscription-only. Need an account? Contact David Martinez.</div>
+    <div class="fld"><label>Email</label><input id="lockEmail" type="email" autocomplete="username" autocapitalize="off"></div>
+    <div class="fld"><label>Password</label><input id="lockPass" type="password" autocomplete="current-password"></div>
+    <div id="lockErr" class="err" style="font-size:13px;min-height:18px;margin-bottom:4px"></div>
+    <button id="lockGo">Sign in</button>
+  </div>
+</div>
+
 <div id="setModal"><div class="sheet">
   <h2>Settings</h2>
   <div class="fld"><label>Agency Name</label><input id="setAgency"></div>
@@ -141,6 +155,7 @@
   <div class="fld"><label>Default Sales Rep (used if the order has none)</label><input id="setRep"></div>
   <button id="setSave">Save</button>
   <button class="secondary" id="setCancel">Cancel</button>
+  <button class="secondary" id="setLogout" style="color:#ff453a">Sign out</button>
 </div></div>
 
 <div id="manualModal"><div class="sheet">
@@ -367,6 +382,52 @@ async function extractSticker(page) {
   } catch (e) { /* sticker optional */ }
   return null;
 }
+
+// ---- account gate (Firebase Authentication) ----
+firebase.initializeApp({
+  apiKey: "AIzaSyAsmuLsnZcddmZ8ucfRMlZp8AEf-jDtX00",
+  authDomain: "reptrack-e55f3.firebaseapp.com",
+  projectId: "reptrack-e55f3",
+  storageBucket: "reptrack-e55f3.firebasestorage.app",
+  messagingSenderId: "230448530244",
+  appId: "1:230448530244:web:064e70042399c808e18d11"
+});
+const auth = firebase.auth();
+let gateReady = false;
+
+auth.onAuthStateChanged(async user => {
+  if (user) {
+    try {
+      await user.getIdToken(true);   // fails if the account was disabled/deleted
+      $("lockModal").style.display = "none";
+      gateReady = true;
+      return;
+    } catch (e) {
+      await auth.signOut().catch(() => {});
+      $("lockErr").textContent = "Your subscription is inactive. Contact David.";
+    }
+  }
+  $("lockModal").style.display = "block";
+});
+
+$("lockGo").onclick = async () => {
+  $("lockErr").textContent = "";
+  const email = $("lockEmail").value.trim();
+  const pass = $("lockPass").value;
+  if (!email || !pass) { $("lockErr").textContent = "Enter your email and password."; return; }
+  try {
+    await auth.signInWithEmailAndPassword(email, pass);
+  } catch (e) {
+    $("lockErr").textContent =
+      e.code === "auth/user-disabled" ? "Your subscription is inactive. Contact David." :
+      e.code === "auth/too-many-requests" ? "Too many attempts — try again later." :
+      "Wrong email or password.";
+  }
+};
+$("setLogout").onclick = async () => {
+  await auth.signOut().catch(() => {});
+  $("setModal").classList.remove("open");
+};
 
 // ---- settings ----
 function getSettings() {
