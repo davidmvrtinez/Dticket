@@ -316,8 +316,9 @@ function parseTable(rows, cases) {
         catalog: cat,
         lot: clean((cells["Lot #"] || "").trim()),
         expiry: expiry,
+        qty: clean((cells["Qty"] || "").trim()),
         unit_price: clean((cells["Unit Price"] || "").trim()),
-        hospital_price: "",
+        hospital_price: extended,          // Extended Price → Total Price column
         loaner: loanerCell
       });
     } else if (cases.length) {
@@ -328,6 +329,8 @@ function parseTable(rows, cases) {
         if (!last.unit_price && (extended || cells["Unit Price"])) last.unit_price = extended || clean(cells["Unit Price"].trim());
       } else {
         if (!last.unit_price && cells["Unit Price"]) last.unit_price = clean(cells["Unit Price"].trim());
+        if (!last.hospital_price && extended) last.hospital_price = extended;
+        if (!last.qty && cells["Qty"]) last.qty = clean(cells["Qty"].trim());
         if (!last.lot && cells["Lot #"]) last.lot = clean(cells["Lot #"].trim());
         if (!last.expiry && expiry) last.expiry = expiry;
         if (loanerCell) last.loaner = true;
@@ -439,7 +442,9 @@ function mItemRow(pre) {
     '<div class="fldrow"><div class="fld"><label>Catalog / REF (optional with photo)</label><input class="mi-cat" value="' + (pre.catalog||"") + '"></div>' +
     '<div class="fld"><label>Lot</label><input class="mi-lot" value="' + (pre.lot||"") + '"></div></div>' +
     '<div class="fldrow"><div class="fld"><label>Expiry</label><input class="mi-exp" value="' + (pre.expiry||"") + '"></div>' +
-    '<div class="fld"><label>Unit Price</label><input class="mi-pr" placeholder="$" value="' + (pre.unit_price||"") + '"></div></div>' +
+    '<div class="fld"><label>Qty</label><input class="mi-qty" inputmode="numeric" value="' + (pre.qty||"") + '"></div></div>' +
+    '<div class="fldrow"><div class="fld"><label>Unit Price</label><input class="mi-pr" placeholder="$" value="' + (pre.unit_price||"") + '"></div>' +
+    '<div class="fld"><label>Total Price</label><input class="mi-tp" placeholder="$" value="' + (pre.hospital_price||"") + '"></div></div>' +
     '<div class="chk"><input type="checkbox" class="mi-lo"' + (pre.loaner ? " checked" : "") + '> Loaner item</div>' +
     '<button class="rm">Remove</button>';
   div.querySelector(".rm").onclick = () => div.remove();
@@ -477,7 +482,9 @@ $("mGo").onclick = async () => {
     if (!cat && !div._photo) return;   // needs a photo or a catalog #
     const it = { catalog: cat, lot: div.querySelector(".mi-lot").value.trim(),
       expiry: div.querySelector(".mi-exp").value.trim(),
-      unit_price: div.querySelector(".mi-pr").value.trim(), hospital_price: "",
+      qty: div.querySelector(".mi-qty").value.trim(),
+      unit_price: div.querySelector(".mi-pr").value.trim(),
+      hospital_price: div.querySelector(".mi-tp").value.trim(),
       loaner: div.querySelector(".mi-lo").checked };
     if (div._photo) {
       it.photo = div._photo;
@@ -737,7 +744,8 @@ function renderStickerUI() {
       return;
     }
     row.innerHTML = '<div class="info">' + (idx+1) + ': ' + (it.catalog||"") +
-      '<small>' + (it.lot ? 'Lot ' + it.lot : '') + (it.expiry ? '  ·  Exp ' + it.expiry : '') + '</small></div>' +
+      '<small>' + (it.lot ? 'Lot ' + it.lot : '') + (it.expiry ? '  ·  Exp ' + it.expiry : '') +
+      (it.qty && +it.qty > 1 ? '  ·  Qty ' + it.qty : '') + '</small></div>' +
       (it.photoUrl ? '<img class="thumb" src="' + it.photoUrl + '">' : '<div class="thumb"></div>');
     const btn = document.createElement("button");
     btn.className = "camBtn";
@@ -934,6 +942,7 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
       if (it.catalog) parts.push("REF " + it.catalog);
       if (it.lot) parts.push("LOT " + it.lot);
       if (it.expiry) parts.push("EXP " + it.expiry);
+      if (it.qty) parts.push("QTY " + it.qty);
       let ref = (startIdx + i + 1) + (parts.length ? ":  " + parts.join("   ") : ":");
       if (it.loaner) ref = "* " + ref;
       d.txt(ref, RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
@@ -948,7 +957,13 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
       } else {
         d.txt("PLACE STICKER BELOW", RIGHT_X+LABEL_W-88, y+row_h-7.5, HB, 5.5, d.greyC);
       }
-      if (it.unit_price) d.ctr(it.unit_price, RIGHT_X+LABEL_W+PRICE_W*0.25, y+row_h/2-3, HV, 8, d.ink);
+      if (it.unit_price) {
+        const uy = it.qty && +it.qty > 1 ? y+row_h/2+1 : y+row_h/2-3;
+        d.ctr(it.unit_price, RIGHT_X+LABEL_W+PRICE_W*0.25, uy, HV, 8, d.ink);
+        if (it.qty && +it.qty > 1)
+          d.ctr("x " + it.qty, RIGHT_X+LABEL_W+PRICE_W*0.25, y+row_h/2-8, HB, 7, d.ink);
+      }
+      if (it.hospital_price) d.ctr(it.hospital_price, RIGHT_X+LABEL_W+PRICE_W*0.75, y+row_h/2-3, HV, 8, d.ink);
     }
   }
   return grid_bot;
