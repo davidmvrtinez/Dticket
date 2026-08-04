@@ -313,7 +313,7 @@ function parseTable(rows, cases) {
     const desc = (cells["Description"] || "").trim();
     const expiry = clean((cells["Expiry"] || "").trim());
     const extended = clean((cells["Extended Price"] || "").trim());
-    const loanerCell = !!(cells["Loaner"] && /yes|x|✓/i.test(cells["Loaner"])) || /^yes$/i.test((cells["Rstk"]||"").trim());
+    const loanerCell = /^(y|yes|x|✓)$/i.test((cells["Loaner"] || "").trim());
     if (/construct/i.test(desc) || /construct/i.test(cat)) {
       cases.push({
         construct: true,
@@ -987,15 +987,13 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
       let ref = (startIdx + i + 1) + (parts.length ? ":  " + parts.join("   ") : ":");
       if (it.loaner) ref = "* " + ref;
       // keep the reference line clear of the right-hand markers
-      const rightRoom = it.wasted ? 132 : 92;
+      const wLbl = "WASTED";
+      const wW = it.wasted ? HB.widthOfTextAtSize(wLbl, 7) + 6 : 0;
+      const rightRoom = 92 + wW;
       while (ref.length && HV.widthOfTextAtSize(ref, 6) > LABEL_W - rightRoom) ref = ref.slice(0, -1);
       d.txt(ref, RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
-      if (it.wasted) {
-        // WASTED badge (I/O on the sales order)
-        const bw2 = 34, bh2 = 8.5, bx = RIGHT_X + LABEL_W - 92 - bw2;
-        d.rect(bx, y + row_h - 9.5, bw2, bh2, {color: d.ink});
-        d.ctr("WASTED", bx + bw2/2, y + row_h - 7.5, HB, 5.5, d.whiteC);
-      }
+      if (it.wasted)   // I/O on the sales order — bold text, clear of the sticker box
+        d.txt(wLbl, RIGHT_X + LABEL_W - 92 - wW + 3, y + row_h - 7.8, HB, 7, d.ink);
       if (it.img) {
         // sticker photo scaled to its row; tall/narrow crops may bleed slightly
         // past the dashed box so different sticker shapes stay legible
