@@ -1048,14 +1048,14 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
       if (it.qty) parts.push("QTY " + it.qty);
       let ref = (startIdx + i + 1) + (parts.length ? ":  " + parts.join("   ") : ":");
       if (it.loaner) ref = "* " + ref;
-      // keep the reference line clear of the right-hand markers
+      // right-hand markers: WASTED sits at the far right edge, sticker cue to its left
       const wLbl = "WASTED";
-      const wW = it.wasted ? HB.widthOfTextAtSize(wLbl, 7) + 6 : 0;
-      const rightRoom = 92 + wW;
-      while (ref.length && HV.widthOfTextAtSize(ref, 6) > LABEL_W - rightRoom) ref = ref.slice(0, -1);
+      const wW = it.wasted ? HB.widthOfTextAtSize(wLbl, 7) + 8 : 0;
+      const cueX = RIGHT_X + LABEL_W - 86 - wW;
+      while (ref.length && HV.widthOfTextAtSize(ref, 6) > (cueX - 4) - (RIGHT_X + 6)) ref = ref.slice(0, -1);
       d.txt(ref, RIGHT_X+6, y+row_h-7.5, HV, 6, d.greyC);
-      if (it.wasted)   // I/O on the sales order — bold text, clear of the sticker box
-        d.txt(wLbl, RIGHT_X + LABEL_W - 92 - wW + 3, y + row_h - 7.8, HB, 7, d.ink);
+      if (it.wasted)   // I/O on the sales order — bold, far right, clear of the sticker box
+        d.rtx(wLbl, RIGHT_X + LABEL_W - 5, y + row_h - 7.8, HB, 7, d.ink);
       if (it.img) {
         // sticker photo scaled to its row; tall/narrow crops may bleed slightly
         // past the dashed box so different sticker shapes stay legible
@@ -1065,7 +1065,7 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
         d.pg.drawImage(it.img, { x: RIGHT_X + pad + 2 + (bw - iw)/2,
                                  y: y + pad + 2 + (bh - ih)/2, width: iw, height: ih });
       } else {
-        d.txt("PLACE STICKER BELOW", RIGHT_X+LABEL_W-86, y+row_h-7.5, HB, 5.5, d.greyC);
+        d.txt("PLACE STICKER BELOW", cueX, y+row_h-7.5, HB, 5.5, d.greyC);
       }
       if (it.unit_price) {
         const uy = it.qty && +it.qty > 1 ? y+row_h/2+1 : y+row_h/2-3;
