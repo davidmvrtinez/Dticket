@@ -131,6 +131,7 @@
   <div id="stickers"></div>
   <div id="previewWrap"></div>
   <button id="dl" style="display:none">Save / Share D-Ticket</button>
+  <button id="editBtn" class="secondary" style="display:none">&#9998; Edit this d-ticket</button>
   <button id="again" class="secondary" style="display:none">Process another order</button>
 </div>
 
@@ -182,6 +183,7 @@
   </div>
   <button id="mGo">Generate D-Ticket</button>
   <button class="secondary" id="mCancel">Cancel</button>
+  <div class="stsub" id="mHint" style="margin-top:10px;display:none">Editing the current d-ticket — sticker photos you already added are kept.</div>
 </div></div>
 <div id="cropModal">
   <div id="cropTitle">Crop the sticker</div>
@@ -461,6 +463,17 @@ function mItemRow(pre) {
     '<div class="chk"><input type="checkbox" class="mi-wa"' + (pre.wasted ? " checked" : "") + '> Wasted (I/O)</div>' +
     '<button class="rm">Remove</button>';
   div.querySelector(".rm").onclick = () => div.remove();
+  // carry an existing sticker photo through an edit
+  if (pre.photo) {
+    div._photo = pre.photo;
+    div._photoUrl = pre.photoUrl || "";
+    div.querySelector(".mi-cam").textContent = "Retake";
+    if (pre.photoUrl) {
+      const th0 = div.querySelector(".mi-thumb");
+      th0.src = pre.photoUrl; th0.style.display = "block";
+      div.querySelector(".mi-thumbph").style.display = "none";
+    }
+  }
   const inp = div.querySelector(".mi-file");
   div.querySelector(".mi-cam").onclick = (e) => { e.preventDefault(); inp.click(); };
   inp.addEventListener("change", async e => {
@@ -471,8 +484,9 @@ function mItemRow(pre) {
       const out = await openCropper(cv, "Crop the implant sticker");
       if (!out) return;
       div._photo = await canvasToJpeg(out);
+      div._photoUrl = out.toDataURL("image/jpeg", 0.6);
       const th = div.querySelector(".mi-thumb");
-      th.src = out.toDataURL("image/jpeg", 0.6);
+      th.src = div._photoUrl;
       th.style.display = "block";
       div.querySelector(".mi-thumbph").style.display = "none";
       div.querySelector(".mi-cam").textContent = "Retake";
@@ -505,7 +519,54 @@ $("manualBtn").onclick = () => {
   $("mPatThumb").style.display = "none";
   $("mPatPh").style.display = "block";
   $("mPatBtn").textContent = "📷 Photo";
+  $("mHint").style.display = "none";
+  ["mCase","mHosp","mCode","mDate","mPo","mSurg","mPat","mNotes","mTotal","mFreight","mGrand"]
+    .forEach(id => $(id).value = "");
+  ["mSide","mRev","mRevP"].forEach(id => $(id).value = "");
   mItemRow();
+  $("manualModal").classList.add("open");
+};
+
+// ---- edit the d-ticket that's on screen (from a sales order or manual) ----
+$("editBtn").onclick = () => {
+  if (!lastData) return;
+  const D = lastData;
+  $("mCase").value = D.ib_case || "";
+  $("mHosp").value = D.hospital || "";
+  $("mCode").value = D.hospital_code || "";
+  const dm = (D.surgery_date || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  $("mDate").value = dm ? dm[3] + "-" + dm[1] + "-" + dm[2] : "";
+  $("mPo").value = D.po || "";
+  $("mSurg").value = (D.surgeon || "").replace(/^Dr\.?\s*/i, "");
+  $("mPat").value = lastPatientLast || "";
+  $("mSide").value = D.side || "";
+  $("mRev").value = D.revision || "";
+  $("mRevP").value = D.revised_product || "";
+  $("mNotes").value = D.notes || "";
+  $("mTotal").value = D.total || "";
+  $("mFreight").value = D.freight || "";
+  $("mGrand").value = D.grand_total || "";
+  // patient sticker carries over
+  manualPatientPng = lastStickerPng;
+  if (manualPatientPng && D.patientThumb) {
+    $("mPatThumb").src = D.patientThumb;
+    $("mPatThumb").style.display = "block";
+    $("mPatPh").style.display = "none";
+    $("mPatBtn").textContent = "Retake";
+  } else if (manualPatientPng) {
+    $("mPatThumb").style.display = "none";
+    $("mPatPh").style.display = "block";
+    $("mPatBtn").textContent = "Replace";
+  } else {
+    $("mPatThumb").style.display = "none";
+    $("mPatPh").style.display = "block";
+    $("mPatBtn").textContent = "📷 Photo";
+  }
+  // items, with their sticker photos preserved
+  $("mItems").innerHTML = "";
+  (D.items || []).forEach(it => mItemRow(it));
+  if (!(D.items || []).length) mItemRow();
+  $("mHint").style.display = "block";
   $("manualModal").classList.add("open");
 };
 $("mCancel").onclick = () => $("manualModal").classList.remove("open");
@@ -525,8 +586,7 @@ $("mGo").onclick = async () => {
       wasted: div.querySelector(".mi-wa").checked };
     if (div._photo) {
       it.photo = div._photo;
-      const th = div.querySelector(".mi-thumb");
-      if (th && th.src) it.photoUrl = th.src;
+      it.photoUrl = div._photoUrl || (div.querySelector(".mi-thumb") || {}).src || "";
     }
     items.push(it);
   });
@@ -555,6 +615,7 @@ $("mGo").onclick = async () => {
   renderStickerUI();
   status("Done. Review, then save.");
   $("dl").style.display = "block";
+  $("editBtn").style.display = "block";
   $("again").style.display = "block";
   $("drop").style.display = "none";
   $("startBtns").style.display = "none";
@@ -909,6 +970,7 @@ async function run(f) {
     $("notesWrap").style.display = "block";
     status("Done. Review, then save.");
     $("dl").style.display = "block";
+    $("editBtn").style.display = "block";
     $("again").style.display = "block";
     $("drop").style.display = "none";
     $("startBtns").style.display = "none";
