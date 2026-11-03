@@ -1120,8 +1120,8 @@ $("mGo").onclick = async () => {
     const it = { catalog: cat, lot: div.querySelector(".mi-lot").value.trim(),
       expiry: div.querySelector(".mi-exp").value.trim(),
       qty: div.querySelector(".mi-qty").value.trim(),
-      unit_price: div.querySelector(".mi-pr").value.trim(),
-      hospital_price: div.querySelector(".mi-tp").value.trim(),
+      unit_price: (v => money(v) != null ? fmtMoney(money(v)) : v)(div.querySelector(".mi-pr").value.trim()),
+      hospital_price: (v => money(v) != null ? fmtMoney(money(v)) : v)(div.querySelector(".mi-tp").value.trim()),
       loaner: div.querySelector(".mi-lo").checked,
       wasted: div.querySelector(".mi-wa").checked, desc };
     if (div._photo) {
@@ -1142,7 +1142,7 @@ $("mGo").onclick = async () => {
     surgeon: surg ? (/^dr/i.test(surg) ? surg : "Dr. " + surg) : "",
     rep: S.rep, agency: S.agency, site: S.site,
     notes: $("mNotes").value.trim(), items,
-    total: $("mTotal").value.trim(), freight: $("mFreight").value.trim(),
+    total: $("mTotal").value.trim(), freight: (v => money(v) != null ? fmtMoney(money(v)) : v)($("mFreight").value.trim()),
     grand_total: $("mGrand").value.trim() || $("mTotal").value.trim()
   };
   lastStickerPng = manualPatientPng;
@@ -1385,7 +1385,7 @@ function renderStickerUI() {
       box.appendChild(row);
       return;
     }
-    row.innerHTML = '<div class="info">' + (idx+1) + ': ' + (it.catalog||"") +
+    row.innerHTML = '<div class="info">' + (idx+1) + ': ' + (it.catalog || (it.desc ? String(it.desc).replace(/</g, "&lt;").slice(0, 40) : "")) +
       '<small>' + (it.lot ? 'Lot ' + it.lot : '') + (it.expiry ? '  ·  Exp ' + it.expiry : '') +
       (it.qty && +it.qty > 1 ? '  ·  Qty ' + it.qty : '') +
       (it.wasted ? '  ·  WASTED' : '') + '</small></div>' +
