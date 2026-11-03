@@ -73,7 +73,7 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   /* ---- crop modal ---- */
   #cropModal { position: fixed; inset: 0; background: rgba(0,0,0,.92); display: none;
-               flex-direction: column; z-index: 100;
+               flex-direction: column; z-index: 130;
                padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); }
   #cropModal.open { display: flex; }
   #cropTitle { color: #fff; font-size: 15px; font-weight: 600; text-align: center; padding: 6px 0 10px; }
@@ -132,6 +132,10 @@
   .scit .r1 b { font-size: 16px; }
   .scit small { color: #aaa; display: block; margin-top: 2px; }
   .scit .warn { color: #ffd60a; }
+  .scit .r2 { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .scit .r2 button { margin: 0; width: auto; min-height: 0; padding: 8px 12px; font-size: 14px; background: #0a84ff; color: #fff; border-radius: 9px; }
+  .scit .r2 img { height: 44px; max-width: 120px; border-radius: 6px; background: #fff; object-fit: contain; }
+  .scit .r2 .ok { color: #30d158; font-size: 13px; }
   .scit input { width: 100%; margin-top: 6px; padding: 9px 10px; border-radius: 8px; border: 1px solid #48484a;
                 background: #2c2c2e; color: #fff; font-size: 16px; }
   .scit .qb { display: flex; align-items: center; gap: 6px; }
@@ -533,6 +537,157 @@ function mItemRow(pre) {
   });
   $("mItems").appendChild(div);
 }
+// Sticker auto-detect. autoSticker(rgba, W, H, quads)
+//  quads: barcode corner sets [{x,y}×4] (topLeft, topRight, bottomRight, bottomLeft) of ONE label, frame coords.
+//  Returns { angle, W2, H2, rect:{x,y,w,h} } — rect is in the frame rotated by -angle about its centre
+//  (canvas W2×H2), i.e. the label is upright and axis-aligned there. null if nothing usable.
+// Method: deskew using the barcode's own orientation, then look for the label's outline — long straight
+// edge lines that run across the barcode's position — nearest to the barcode on each side.
+function stickerDeskew(W, H, angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const W2 = Math.round(Math.abs(W * c) + Math.abs(H * s)), H2 = Math.round(Math.abs(W * s) + Math.abs(H * c));
+  // frame → deskewed
+  const fwd = p => { const dx = p.x - W / 2, dy = p.y - H / 2; return { x: dx * c + dy * s + W2 / 2, y: -dx * s + dy * c + H2 / 2 }; };
+  // deskewed → frame
+  const inv = p => { const dx = p.x - W2 / 2, dy = p.y - H2 / 2; return { x: dx * c - dy * s + W / 2, y: dx * s + dy * c + H / 2 }; };
+  return { W2, H2, fwd, inv };
+}
+function autoSticker(rgba, W, H, quads) {
+  if (!quads || !quads.length) return null;
+  // orientation from the largest barcode's top edge
+  let best = quads[0], bl = 0;
+  quads.forEach(q => { const l = Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y); if (l > bl) { bl = l; best = q; } });
+  const a0 = Math.atan2(best[1].y - best[0].y, best[1].x - best[0].x);
+  let sx = 0, sy = 0;
+  quads.forEach(q => { for (let k = 0; k < 4; k++) { const p = q[k], n = q[(k + 1) % 4];
+    let a = Math.atan2(n.y - p.y, n.x - p.x) - a0; a = a - Math.round(a / (Math.PI / 2)) * (Math.PI / 2); // fold to ±45°
+    const l = Math.hypot(n.x - p.x, n.y - p.y); sx += Math.cos(a * 4) * l; sy += Math.sin(a * 4) * l; } });
+  let angle = a0 + Math.atan2(sy, sx) / 4;
+  const D = stickerDeskew(W, H, angle);
+  const S = Math.min(1, 700 / Math.max(D.W2, D.H2)), w = Math.round(D.W2 * S), h = Math.round(D.H2 * S);
+  // sample deskewed luminance (nearest neighbour); outside frame = NaN-ish (-1)
+  const L = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = D.inv({ x: x / S, y: y / S }), fx = p.x | 0, fy = p.y | 0;
+    if (fx < 0 || fy < 0 || fx >= W || fy >= H) { L[y * w + x] = -1; continue; }
+    const i = (fy * W + fx) * 4; L[y * w + x] = rgba[i] * 0.299 + rgba[i + 1] * 0.587 + rgba[i + 2] * 0.114; }
+  // barcode union in analysis coords
+  let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+  quads.forEach(q => q.forEach(p0 => { const p = D.fwd(p0); bx0 = Math.min(bx0, p.x * S); by0 = Math.min(by0, p.y * S); bx1 = Math.max(bx1, p.x * S); by1 = Math.max(by1, p.y * S); }));
+  bx0 = Math.max(2, bx0 | 0); by0 = Math.max(2, by0 | 0); bx1 = Math.min(w - 3, Math.ceil(bx1)); by1 = Math.min(h - 3, Math.ceil(by1));
+  const bw = bx1 - bx0, bh = Math.max(4, by1 - by0);
+  // directional edge maps: Eh = horizontal lines (vertical step, smoothed along x), Ev = vertical lines
+  const T = 14, Eh = new Uint8Array(w * h), Ev = new Uint8Array(w * h), Gx = new Uint8Array(w * h);
+  const at = (x, y) => L[y * w + x];
+  for (let y = 2; y < h - 2; y++) for (let x = 2; x < w - 2; x++) {
+    if (at(x, y) < 0) continue;
+    let a = 0, b = 0, c = 0, d = 0;
+    for (let k = -2; k <= 2; k++) { a += at(x + k, y - 2); b += at(x + k, y + 2); c += at(x - 2, y + k); d += at(x + 2, y + k); }
+    if (Math.abs(a - b) / 5 > T) Eh[y * w + x] = 1;
+    if (Math.abs(c - d) / 5 > T) Ev[y * w + x] = 1;
+    if (Math.abs(at(x - 1, y) - at(x + 1, y)) > 25) Gx[y * w + x] = 1; // fine vertical detail (barcode bars, text)
+  }
+  // run of an edge line through (x,y) along x (horizontal) allowing small gaps and ±1px wobble
+  const GAP = 4;
+  function hRun(y, x) {
+    const on = xx => Eh[y * w + xx] || Eh[(y - 1) * w + xx] || Eh[(y + 1) * w + xx];
+    let s = -1; for (let k = 0; k <= 3 && s < 0; k++) { if (on(x + k)) s = x + k; else if (on(x - k)) s = x - k; }
+    if (s < 0) return null;
+    let lo = s, hi = s, g = 0;
+    for (let xx = s - 1; xx >= 1; xx--) { if (on(xx)) { lo = xx; g = 0; } else if (++g > GAP) break; }
+    g = 0; for (let xx = s + 1; xx < w - 1; xx++) { if (on(xx)) { hi = xx; g = 0; } else if (++g > GAP) break; }
+    let n = 0; for (let xx = lo; xx <= hi; xx++) if (on(xx)) n++;
+    return (n / (hi - lo + 1) < 0.85) ? null : [lo, hi];
+  }
+  function vRun(x, y) {
+    const on = yy => Ev[yy * w + x] || Ev[yy * w + x - 1] || Ev[yy * w + x + 1];
+    let s = -1; for (let k = 0; k <= 3 && s < 0; k++) { if (on(y + k)) s = y + k; else if (on(y - k)) s = y - k; }
+    if (s < 0) return null;
+    let lo = s, hi = s, g = 0;
+    for (let yy = s - 1; yy >= 1; yy--) { if (on(yy)) { lo = yy; g = 0; } else if (++g > GAP) break; }
+    g = 0; for (let yy = s + 1; yy < h - 1; yy++) { if (on(yy)) { hi = yy; g = 0; } else if (++g > GAP) break; }
+    let n = 0; for (let yy = lo; yy <= hi; yy++) if (on(yy)) n++;
+    return (n / (hi - lo + 1) < 0.85) ? null : [lo, hi];
+  }
+  // reject lines that are really the top/bottom of a barcode (busy fine detail right beside them)
+  function busy(y, x0, x1) { let n = 0, t = 0; for (let x = x0; x <= x1; x += 2) { t++; if (Gx[y * w + x]) n++; } return t ? n / t : 0; }
+  const minH = Math.max(bw * 1.05, w * 0.16);
+  // a real label outline has a blank margin on at least one side; text/icon chains have detail on both
+  function quietH(y, x0, x1) { let best = 1;
+    for (const sg of [-1, 1]) { let n = 0, t = 0;
+      for (let d = 4; d <= 7; d++) { const yy = y + sg * d; if (yy < 1 || yy > h - 2) continue;
+        for (let x = x0; x <= x1; x += 2) { t++; if (Eh[yy * w + x] || Ev[yy * w + x]) n++; } }
+      if (t) best = Math.min(best, n / t); }
+    return best; }
+  function quietV(x, y0, y1) { let best = 1;
+    for (const sg of [-1, 1]) { let n = 0, t = 0;
+      for (let d = 4; d <= 7; d++) { const xx = x + sg * d; if (xx < 1 || xx > w - 2) continue;
+        for (let y = y0; y <= y1; y += 2) { t++; if (Eh[y * w + xx] || Ev[y * w + xx]) n++; } }
+      if (t) best = Math.min(best, n / t); }
+    return best; }
+  function findH(from, to, cx) {
+    const dir = to > from ? 1 : -1;
+    for (let y = from; dir > 0 ? y <= to : y >= to; y += dir) {
+      if (y < 2 || y > h - 3) return null;
+      const r = hRun(y, cx); if (!r || r[1] - r[0] < minH) continue;
+      if (Math.max(busy(Math.max(1, y - 5), r[0], r[1]), busy(Math.min(h - 2, y + 5), r[0], r[1])) > 0.22) continue;
+      return { y, r };
+    }
+    return null;
+  }
+  function findV(from, to, cy, minLen, longest) {
+    const dir = to > from ? 1 : -1; let bestV = null;
+    for (let x = from; dir > 0 ? x <= to : x >= to; x += dir) {
+      if (x < 2 || x > w - 3) break;
+      if (x < 7 || x > w - 8 || at(x - 6, cy) < 0 || at(x + 6, cy) < 0) continue; // frame border, not a label edge
+      const r = vRun(x, cy); if (!r || r[1] - r[0] < minLen) continue;
+      if (!longest) return { x, r };
+      const len = r[1] - r[0]; if (!bestV || len > bestV.len * 1.05) bestV = { x, r, len };
+    }
+    return bestV;
+  }
+  const mg = 3;
+  const big = Math.max(bw, bh), bcy = ((by0 + by1) / 2) | 0, cx0 = ((bx0 + bx1) / 2) | 0;
+  // 1) side edges first: long vertical lines left/right of the barcodes
+  let minV = Math.max(bh * 1.3, h * 0.12);
+  let lef = findV(bx0 - mg, 2, bcy, minV), rig = findV(bx1 + mg, w - 3, bcy, minV);
+  let x0 = lef ? lef.x : null, x1 = rig ? rig.x : null, y0 = null, y1 = null;
+  const hr = [];
+  for (let pass = 0; pass < 2; pass++) {
+    // 2) top/bottom: horizontal lines spanning most of the label's width
+    const lw = (x0 != null && x1 != null) ? x1 - x0 : null;
+    const need = lw ? lw * 0.7 : Math.max(bw * 0.9, w * 0.16);
+    const cx = lw ? ((x0 + x1) / 2) | 0 : cx0;
+    const fH = (from, to, px, qt) => { const dir = to > from ? 1 : -1;
+      for (let y = from; dir > 0 ? y <= to : y >= to; y += dir) { if (y < 2 || y > h - 3) return null;
+        const r = hRun(y, px); if (!r || r[1] - r[0] < need) continue;
+        if (Math.max(busy(Math.max(1, y - 4), r[0], r[1]), busy(Math.min(h - 2, y + 4), r[0], r[1])) > 0.3) continue;
+        if (quietH(y, r[0], r[1]) > qt) continue;
+        hr.push(r); return y; } return null; };
+    const probes = lw ? [x0 + lw * 0.3, cx, x0 + lw * 0.7].map(v => v | 0) : [cx0];
+    const pick = (arr, dir) => { const ok = arr.filter(v => v != null); if (!ok.length) return null; ok.sort((a, b) => dir * (a - b)); return ok.length >= 2 ? ok[1] : ok[0]; };
+    const t = pick(probes.map(px => fH(by0 - mg, 2, px, 0.3)), -1) ?? pick(probes.map(px => fH(by0 - mg, 2, px, 0.45)), -1);
+    const b = pick(probes.map(px => fH(by1 + mg, h - 3, px, 0.3)), 1) ?? pick(probes.map(px => fH(by1 + mg, h - 3, px, 0.45)), 1);
+    if (t != null) y0 = t; if (b != null) y1 = b;
+    if (y0 == null && y1 == null) break;
+    // 3) re-find side edges at the label's middle with a length requirement from its height
+    const ya = y0 ?? Math.max(2, by0 - (y1 - by1)), yb = y1 ?? Math.min(h - 3, by1 + (by0 - y0));
+    const cy = ((ya + yb) / 2) | 0; minV = (yb - ya) * 0.8;
+    const l2 = findV(bx0 - mg, 2, cy, minV, 1), r2 = findV(bx1 + mg, w - 3, cy, minV, 1);
+    if (l2) { lef = l2; x0 = l2.x; } if (r2) { rig = r2; x1 = r2.x; }
+  }
+  // no edge found on a side → the label runs off the frame there (or is unreadable): go to the frame edge,
+  // but never more than a sane distance from the barcodes
+  const lim = Math.max(bw, bh) * 6;
+  if (y0 == null) y0 = Math.max(0, by0 - lim); if (y1 == null) y1 = Math.min(h - 1, by1 + lim);
+  if (x0 == null) x0 = Math.max(0, bx0 - lim); if (x1 == null) x1 = Math.min(w - 1, bx1 + lim);
+  x0 = Math.min(x0, bx0); x1 = Math.max(x1, bx1); y0 = Math.min(y0, by0); y1 = Math.max(y1, by1);
+  const pad = 2;
+  const X0 = Math.max(0, x0 - pad), Y0 = Math.max(0, y0 - pad), X1 = Math.min(w - 1, x1 + pad), Y1 = Math.min(h - 1, y1 + pad);
+  return { angle, W2: D.W2, H2: D.H2, rect: { x: X0 / S, y: Y0 / S, w: (X1 - X0) / S, h: (Y1 - Y0) / S },
+    corners: [[X0, Y0], [X1, Y0], [X1, Y1], [X0, Y1]].map(([x, y]) => D.inv({ x: x / S, y: y / S })) };
+}
+
 // ---- implant barcode scanner (RepTrack Implant Scanner Kit) ----
 // Labels whose barcode product id isn't in the kit's list yet (taken from David's own labels)
 const SCAN_SEED_GTIN = { '08033390354189': '9617.25.347', '03760177046542': '415-00-080' };
@@ -568,13 +723,21 @@ function scanRender() {
     d.innerHTML = '<div class="r1"><b>' + (it.ref || 'REF ?') + '</b><span class="qb"><button data-a="-">−</button><span>' + it.qty +
       '</span><button data-a="+">+</button><button data-a="x" style="background:#5a1d1d">✕</button></span></div>' +
       (it.name ? '<small>' + it.name + '</small>' : '') +
-      '<small>LOT ' + (it.lot || '—') + '  ·  EXP ' + (isoToUS(it.exp) || '—') + '</small>' + need;
+      '<small>LOT ' + (it.lot || '—') + '  ·  EXP ' + (isoToUS(it.exp) || '—') + '</small>' + need +
+      (it.refSrc === 'fda' ? '<small style="color:#64d2ff">REF from FDA device database</small>' : '');
+    if (scanShots.has(it.id)) {
+      const ph = scanPhotos.get(it.id), r2 = document.createElement('div'); r2.className = 'r2';
+      r2.innerHTML = (ph ? '<img src="' + ph.url + '"><span class="ok">✓ sticker saved</span>' : '') +
+        '<button>' + (ph ? '✂ Re-crop' : '✂ Crop sticker') + '</button>';
+      r2.querySelector('button').onclick = e => { e.preventDefault(); scanCropItem(it.id); };
+      d.appendChild(r2);
+    }
     if (it.status === 'needsRef' || it.status === 'needsLot') {
       const inp = document.createElement('input');
       inp.placeholder = it.status === 'needsRef' ? 'Type REF' : 'Type LOT';
       inp.addEventListener('change', () => {
         const v = inp.value.trim(); if (!v) return;
-        if (it.status === 'needsRef') { scanSess.setRef(it.id, v, ''); if (it.pid) { scanLearn(it.pid, v); scanCtx.gtinMap[it.pid] = v; } }
+        if (it.status === 'needsRef') { scanSess.setRef(it.id, v, ''); it.refSrc = 'user'; if (it.pid) { scanLearn(it.pid, v); scanCtx.gtinMap[it.pid] = v; } }
         else scanSess.updateItem(it.id, { lot: v });
         scanRender();
       });
@@ -588,6 +751,80 @@ function scanRender() {
     });
     box.appendChild(d);
   });
+}
+
+// ---- REF lookup in the FDA's device database (AccessGUDID) for barcodes the offline list doesn't know ----
+const scanGudidCache = () => { try { return JSON.parse(localStorage.getItem('dt_gudid') || '{}'); } catch (e) { return {}; } };
+const scanGudidPending = new Set();
+async function scanGudid(it) {
+  const gtin = it && it.pid; if (!gtin || !/^\d{14}$/.test(gtin) || scanGudidPending.has(gtin)) return;
+  if (scanLearned()[gtin]) return;                       // REF the user typed wins
+  const cache = scanGudidCache();
+  let ref = cache[gtin];
+  if (ref === undefined) {
+    scanGudidPending.add(gtin);
+    try {
+      const r = await fetch('https://accessgudid.nlm.nih.gov/api/v3/devices/lookup.json?di=' + gtin);
+      ref = r.ok ? (((await r.json()).gudid || {}).device || {}).catalogNumber || '' : (r.status === 404 ? '' : undefined);
+    } catch (e) { ref = undefined; }                      // offline: try again next time
+    scanGudidPending.delete(gtin);
+    if (ref !== undefined) { const c = scanGudidCache(); c[gtin] = ref; try { localStorage.setItem('dt_gudid', JSON.stringify(c)); } catch (e) {} }
+  }
+  ref = (ref || '').trim();
+  if (!ref || !scanSess) return;
+  scanCtx.gtinMap[gtin] = ref;
+  let changed = false;
+  scanSess.items.forEach(x => { if (x.pid === gtin && x.ref !== ref && x.refSrc !== 'user') {
+    scanSess.setRef(x.id, ref, x.name); x.ref = ref; x.refSrc = 'fda'; scanSess.updateItem(x.id, {}); changed = true; } });
+  if (changed) { scanRender(); scanSay('✓ REF ' + ref + ' (FDA device database)'); }
+}
+
+// ---- sticker photo from the scan: keep the frame each implant was read from ----
+const scanShots = new Map();    // item id → { cv (full-res frame), quads (barcodes of that label) }
+const scanPhotos = new Map();   // item id → { bytes, url }
+const scanNativeCv = document.createElement('canvas');
+let scanPaused = false;
+function scanCapture(item, quads) {
+  if (!item || !quads.length || !scanNativeCv.width) return;
+  const k = scanNativeCv.width / scanFrameCv.width;
+  const cv = document.createElement('canvas'); cv.width = scanNativeCv.width; cv.height = scanNativeCv.height;
+  cv.getContext('2d').drawImage(scanNativeCv, 0, 0);
+  scanShots.set(item.id, { cv, quads: quads.map(q => q.map(p => ({ x: p.x * k, y: p.y * k }))) });
+}
+// barcodes of the label that was just read: same LOT/REF and physically next to each other
+// (keeps identical stickers sitting side by side apart)
+function scanLabelQuads(t, results, it, fw, fh) {
+  const quad = r => { const p = r.position; return [p.topLeft, p.topRight, p.bottomRight, p.bottomLeft]; };
+  const bb = r => { const q = quad(r), xs = q.map(v => v.x), ys = q.map(v => v.y); return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; };
+  const gap = (a, b) => { const A = bb(a), B = bb(b); return Math.max(0, Math.max(A[0], B[0]) - Math.min(A[2], B[2])) + Math.max(0, Math.max(A[1], B[1]) - Math.min(A[3], B[3])); };
+  const mine = results.filter(r => { if (r === t) return true; if (!r.position || !it) return false;
+    const x = ImplantKit.interpretScan(r.text, scanCtx); return (x.lot && x.lot === it.lot) || (x.ref && x.ref === it.ref); });
+  const grp = [t], lim = Math.max(fw, fh) * 0.08;
+  for (let ch = true; ch;) { ch = false; for (const r of mine) if (!grp.includes(r) && grp.some(g => gap(g, r) < lim)) { grp.push(r); ch = true; } }
+  return grp.filter(r => r.position).map(quad);
+}
+async function scanCropItem(id) {
+  const rec = scanShots.get(id); if (!rec) return;
+  scanPaused = true;
+  try {
+    const src = rec.cv; let cv = src, init = null;
+    try {
+      const det = autoSticker(src.getContext('2d').getImageData(0, 0, src.width, src.height).data, src.width, src.height, rec.quads);
+      if (det) {
+        if (Math.abs(det.angle) > 0.004) {            // straighten so the label is level (and upright)
+          cv = document.createElement('canvas'); cv.width = det.W2; cv.height = det.H2;
+          const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, det.W2, det.H2);
+          g.translate(det.W2 / 2, det.H2 / 2); g.rotate(-det.angle); g.drawImage(src, -src.width / 2, -src.height / 2);
+        }
+        init = det.rect;
+      }
+    } catch (e) { console.warn('auto sticker', e); }
+    const out = await openCropper(cv, 'Sticker found — drag to adjust, then Use', init);
+    if (!out) return;
+    scanPhotos.set(id, { bytes: await canvasToJpeg(out), url: out.toDataURL('image/jpeg', 0.6) });
+    scanRender();
+  } catch (e) { alert('Could not crop that sticker: ' + e.message); }
+  finally { scanPaused = false; }
 }
 
 function scanOnRaw(raw) {
@@ -678,9 +915,11 @@ function scanHandleFrame(results, fw, fh) {
         scanCoolUntil = Date.now() + SCAN_COOLDOWN_MS;
         // other barcodes on the same label (same REF or LOT) are part of this implant → green too
         const it = ev.item || (scanSess.lastItem);
+        if (it && !scanShots.has(it.id)) scanCapture(it, scanLabelQuads(t, results, it, fw, fh));
         results.forEach(r => { if (r === t || scanDone.has(r.text) || !it) return;
           const x = ImplantKit.interpretScan(r.text, scanCtx);
           if ((x.lot && x.lot === it.lot) || (x.ref && x.ref === it.ref)) { scanDone.set(r.text, 'ok'); scanSess.handle(r.text, Date.now(), scanCtx); } });
+        if (it) scanGudid(it);
         scanRender();
       }
     }
@@ -692,12 +931,14 @@ async function scanLoop() {
   if (!scanLoopOn) return;
   const v = $('scanVid');
   try {
-    if (v.readyState >= 2 && v.videoWidth) {
+    if (!scanPaused && v.readyState >= 2 && v.videoWidth) {
       const vw = v.videoWidth, vh = v.videoHeight, sc = Math.min(1, 1280 / Math.max(vw, vh));
       const w = Math.round(vw * sc), h = Math.round(vh * sc);
+      if (scanNativeCv.width !== vw || scanNativeCv.height !== vh) { scanNativeCv.width = vw; scanNativeCv.height = vh; }
+      scanNativeCv.getContext('2d').drawImage(v, 0, 0, vw, vh);       // full-res copy (for the sticker photo)
       if (scanFrameCv.width !== w) { scanFrameCv.width = w; scanFrameCv.height = h; }
       const cx = scanFrameCv.getContext('2d', { willReadFrequently: true });
-      cx.drawImage(v, 0, 0, w, h);
+      cx.drawImage(scanNativeCv, 0, 0, w, h);
       const res = await ZXingWASM.readBarcodes(cx.getImageData(0, 0, w, h),
         { formats: SCAN_FORMATS, tryHarder: true, maxNumberOfSymbols: 8 });
       if (scanLoopOn) scanHandleFrame(res.filter(r => r.isValid !== false && r.text), w, h);
@@ -710,6 +951,7 @@ async function scanOpen() {
   $('scanModal').classList.add('open');
   scanSess = null; scanRender(); scanSay('Starting camera…');
   scanSeen.clear(); scanDone.clear(); scanCoolUntil = 0; scanStableText = ''; scanStableN = 0;
+  scanShots.clear(); scanPhotos.clear(); scanPaused = false;
   try {
     scanStream = await navigator.mediaDevices.getUserMedia({ audio: false,
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
@@ -749,7 +991,9 @@ $('scanDone').onclick = () => {
     // drop the single untouched blank row the form starts with
     const rows = document.querySelectorAll('#mItems .mitem');
     rows.forEach(r => { if (!r.querySelector('.mi-cat').value.trim() && !r.querySelector('.mi-lot').value.trim() && !r._photo) r.remove(); });
-    list.forEach(it => mItemRow({ catalog: it.ref, lot: it.lot, expiry: isoToUS(it.exp), qty: it.qty > 1 ? String(it.qty) : '' }));
+    list.forEach(it => { const ph = scanPhotos.get(it.id);
+      mItemRow({ catalog: it.ref, lot: it.lot, expiry: isoToUS(it.exp), qty: it.qty > 1 ? String(it.qty) : '',
+                 photo: ph ? ph.bytes : null, photoUrl: ph ? ph.url : '' }); });
   }
   scanStop();
   if (list.length) status('Added ' + list.length + ' scanned implant' + (list.length > 1 ? 's' : '') + ' — fill in prices, then Generate.');
@@ -941,7 +1185,7 @@ function rotate90(cv) {
 }
 
 // ---- manual crop modal (free-form crop + rotate) ----
-function openCropper(srcCanvas, idx) {
+function openCropper(srcCanvas, idx, initRect) {
   return new Promise(resolve => {
     const modal = $("cropModal"), stage = $("cropStage"), imgEl = $("cropImg"),
           rect = $("cropRect"), handle = $("cropHandle");
@@ -963,7 +1207,8 @@ function openCropper(srcCanvas, idx) {
       imgEl.style.left = ox + "px"; imgEl.style.top = oy + "px";
       imgEl.style.width = iw + "px"; imgEl.style.height = ih + "px";
       // initial crop: auto-detected region if available, else row-shaped and centered
-      const auto = autoTrim(src);
+      const auto = initRect || autoTrim(src);
+      initRect = null;   // after a rotate, fall back to the generic detector
       if (auto) {
         r.w = auto.w * scale; r.h = auto.h * scale;
         r.x = ox + auto.x * scale; r.y = oy + auto.y * scale;
