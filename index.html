@@ -13,6 +13,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="scanner.js" defer></script>
+<script src="zxing-reader.js" defer></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -115,10 +116,12 @@
   #scanModal.open { display: flex; }
   #scanHead { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
   #scanHead b { font-size: 17px; }
-  #scanVidWrap { position: relative; border-radius: 14px; overflow: hidden; background: #111; height: 34vh; flex: none;
+  #scanVidWrap { position: relative; border-radius: 14px; overflow: hidden; background: #111; height: 46vh; flex: none;
                  border: 3px solid #333; transition: border-color .15s; }
-  #scanVid { width: 100%; height: 100%; object-fit: cover; }
-  #scanVidWrap::after { content: ""; position: absolute; left: 8%; right: 8%; top: 50%; height: 2px; background: rgba(255,59,48,.8); }
+  #scanVid { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #scanOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #scanCool { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); background: rgba(48,209,88,.92);
+              color: #000; font-weight: 700; font-size: 14px; padding: 6px 12px; border-radius: 20px; display: none; }
   #scanStatus { font-size: 14px; min-height: 38px; padding: 8px 2px; color: #ddd; }
   #scanTools { display: flex; gap: 8px; }
   #scanTools button, #scanHead button { margin: 0; width: auto; min-height: 0; padding: 9px 14px; font-size: 14px;
@@ -215,7 +218,7 @@
 </div></div>
 <div id="scanModal">
   <div id="scanHead"><b>Scan implants</b><button id="scanClose">Cancel</button></div>
-  <div id="scanVidWrap"><video id="scanVid" playsinline muted></video></div>
+  <div id="scanVidWrap"><video id="scanVid" playsinline muted autoplay></video><canvas id="scanOverlay"></canvas><div id="scanCool">✓ Got it — next implant</div></div>
   <div id="scanStatus">Starting camera…</div>
   <div id="scanTools"><button id="scanTorch" style="display:none">Light</button><button id="scanZoom" style="display:none">Zoom 2×</button></div>
   <div id="scanList"></div>
@@ -589,7 +592,7 @@ function scanRender() {
 
 function scanOnRaw(raw) {
   const now = Date.now(), ev = scanSess.handle(raw, now, scanCtx);
-  if (ev.type === 'ignored') return;
+  if (ev.type === 'ignored') return ev;
   if (ev.type === 'added' || (ev.type === 'filled' && ev.completed)) { scanBeep(true); scanFlash('#30d158'); scanSay('✓ ' + ev.item.ref + '  LOT ' + ev.item.lot + '  EXP ' + isoToUS(ev.item.exp)); }
   else if (ev.type === 'held' || ev.type === 'filled' || ev.type === 'waiting') { scanBeep(true); scanFlash('#ffd60a');
     scanSay(ev.type === 'waiting' ? 'Got LOT/EXP — now scan the product barcode' : ev.item && ev.item.status === 'needsLot' ? 'Got REF — now scan the LOT barcode' : 'Scanned — REF needed, type it below'); }
@@ -600,34 +603,138 @@ function scanOnRaw(raw) {
     scanSay(add ? 'Added another ' + ev.item.ref : 'Skipped duplicate');
   } else if (ev.type === 'unknown') { scanBeep(false); scanFlash('#ff453a'); scanSay('Barcode not recognized — try the square UDI barcode'); }
   scanRender();
+  return ev;
+}
+
+// ---- live camera loop: zxing-cpp (WebAssembly) finds every barcode in the frame + its corners ----
+const SCAN_COOLDOWN_MS = 1500;      // pause after each accepted scan so one implant isn't counted twice
+const SCAN_FORMATS = ['DataMatrix', 'QRCode', 'Code128', 'Code39', 'EAN-13', 'UPC-A', 'PDF417', 'Aztec', 'DataBarExpanded'];
+let scanLoopOn = false, scanCoolUntil = 0, scanStableText = '', scanStableN = 0;
+const scanSeen = new Map();          // text → last time it was in the frame
+const scanDone = new Map();          // text → 'ok' | 'bad' (already handled while it stays in view)
+const scanFrameCv = document.createElement('canvas');
+let scanWasmReady = null;
+
+function scanPrepWasm() {
+  if (!scanWasmReady) scanWasmReady = (async () => {
+    for (let i = 0; i < 50 && !window.ZXingWASM; i++) await new Promise(r => setTimeout(r, 100));
+    if (!window.ZXingWASM) throw new Error('barcode reader failed to load');
+    await ZXingWASM.prepareZXingModule({
+      overrides: { locateFile: (p, prefix) => p.endsWith('.wasm') ? new URL('zxing_reader.wasm', location.href).href : prefix + p },
+      fireImmediately: true });
+  })();
+  return scanWasmReady;
+}
+
+function scanDraw(results, fw, fh, now) {
+  const ov = $('scanOverlay'), wrap = $('scanVidWrap'), dpr = window.devicePixelRatio || 1;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  if (ov.width !== Math.round(cw * dpr)) { ov.width = Math.round(cw * dpr); ov.height = Math.round(ch * dpr); }
+  const g = ov.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, cw, ch);
+  if (!results || !fw) return;
+  const k = Math.max(cw / fw, ch / fh), ox = (cw - fw * k) / 2, oy = (ch - fh * k) / 2;   // object-fit: cover
+  const P = pt => [pt.x * k + ox, pt.y * k + oy];
+  results.forEach(r => {
+    const p = r.position; if (!p) return;
+    let pts = [p.topLeft, p.topRight, p.bottomRight, p.bottomLeft].map(P);
+    // long 1D barcodes come back thin: give the box some height so it's easy to see
+    const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
+    if (Math.max(...ys) - Math.min(...ys) < 18) { const cy = (Math.max(...ys) + Math.min(...ys)) / 2;
+      pts = [[Math.min(...xs), cy - 12], [Math.max(...xs), cy - 12], [Math.max(...xs), cy + 12], [Math.min(...xs), cy + 12]]; }
+    const ok = scanDone.get(r.text) === 'ok';
+    g.lineWidth = 4; g.strokeStyle = ok ? '#30d158' : '#ff3b30';
+    g.fillStyle = ok ? 'rgba(48,209,88,.18)' : 'rgba(255,59,48,.12)';
+    g.beginPath(); pts.forEach((q, i) => i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1])); g.closePath(); g.fill(); g.stroke();
+  });
+}
+
+function scanPickTarget(cands, fw, fh) {
+  const cx = fw / 2, cy = fh / 2;
+  const center = r => { const p = r.position; return [(p.topLeft.x + p.bottomRight.x) / 2, (p.topLeft.y + p.bottomRight.y) / 2]; };
+  const dist = r => { const [x, y] = center(r); return Math.hypot(x - cx, y - cy); };
+  const twoD = cands.filter(r => /DataMatrix|QR|Aztec/.test(r.format));    // square UDI codes carry REF+LOT+EXP
+  const pool = twoD.length ? twoD : cands;
+  return pool.slice().sort((a, b) => dist(a) - dist(b))[0];
+}
+
+function scanHandleFrame(results, fw, fh) {
+  const now = Date.now();
+  results.forEach(r => scanSeen.set(r.text, now));
+  // a barcode that has left the view for a while can be scanned again (session will ask "add another?")
+  for (const [t] of scanDone) if (now - (scanSeen.get(t) || 0) > SCAN_COOLDOWN_MS) scanDone.delete(t);
+  const cooling = now < scanCoolUntil;
+  $('scanCool').style.display = cooling ? 'block' : 'none';
+  if (!cooling) {
+    const cands = results.filter(r => r.text && !scanDone.has(r.text));
+    const t = cands.length ? scanPickTarget(cands, fw, fh) : null;
+    if (t && t.text === scanStableText) scanStableN++; else { scanStableText = t ? t.text : ''; scanStableN = t ? 1 : 0; }
+    if (t && scanStableN >= 2) {                          // seen in 2 frames in a row → accept
+      scanStableText = ''; scanStableN = 0;
+      const ev = scanOnRaw(t.text);
+      const good = ev && ev.type !== 'unknown';
+      scanDone.set(t.text, good ? 'ok' : 'bad');
+      if (good) {
+        scanCoolUntil = Date.now() + SCAN_COOLDOWN_MS;
+        // other barcodes on the same label (same REF or LOT) are part of this implant → green too
+        const it = ev.item || (scanSess.lastItem);
+        results.forEach(r => { if (r === t || scanDone.has(r.text) || !it) return;
+          const x = ImplantKit.interpretScan(r.text, scanCtx);
+          if ((x.lot && x.lot === it.lot) || (x.ref && x.ref === it.ref)) { scanDone.set(r.text, 'ok'); scanSess.handle(r.text, Date.now(), scanCtx); } });
+        scanRender();
+      }
+    }
+  }
+  scanDraw(results, fw, fh, now);
+}
+
+async function scanLoop() {
+  if (!scanLoopOn) return;
+  const v = $('scanVid');
+  try {
+    if (v.readyState >= 2 && v.videoWidth) {
+      const vw = v.videoWidth, vh = v.videoHeight, sc = Math.min(1, 1280 / Math.max(vw, vh));
+      const w = Math.round(vw * sc), h = Math.round(vh * sc);
+      if (scanFrameCv.width !== w) { scanFrameCv.width = w; scanFrameCv.height = h; }
+      const cx = scanFrameCv.getContext('2d', { willReadFrequently: true });
+      cx.drawImage(v, 0, 0, w, h);
+      const res = await ZXingWASM.readBarcodes(cx.getImageData(0, 0, w, h),
+        { formats: SCAN_FORMATS, tryHarder: true, maxNumberOfSymbols: 8 });
+      if (scanLoopOn) scanHandleFrame(res.filter(r => r.isValid !== false && r.text), w, h);
+    }
+  } catch (e) { console.warn('scan frame', e); }
+  if (scanLoopOn) setTimeout(scanLoop, 40);
 }
 
 async function scanOpen() {
   $('scanModal').classList.add('open');
-  scanSess = null; scanRender(); scanSay('Loading scanner…');
-  try { await scanLoadData(); } catch (e) { scanSay('Could not load the scanner: ' + e.message); return; }
-  scanSess = ImplantKit.createScanSession();
-  scanCtx = { gtinMap: { ...SCAN_SEED_GTIN, ...scanLearned() }, userCatalog: {} };
-  scanRender();
+  scanSess = null; scanRender(); scanSay('Starting camera…');
+  scanSeen.clear(); scanDone.clear(); scanCoolUntil = 0; scanStableText = ''; scanStableN = 0;
   try {
-    const K = ImplantKit, hints = new Map();
-    hints.set(K.DecodeHintType.POSSIBLE_FORMATS, [K.BarcodeFormat.DATA_MATRIX, K.BarcodeFormat.CODE_128, K.BarcodeFormat.CODE_39,
-      K.BarcodeFormat.QR_CODE, K.BarcodeFormat.EAN_13, K.BarcodeFormat.UPC_A, K.BarcodeFormat.PDF_417, K.BarcodeFormat.AZTEC]);
-    hints.set(K.DecodeHintType.TRY_HARDER, true);
-    scanReader = new K.BrowserMultiFormatReader(hints, 250);
-    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    scanStream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    const v = $('scanVid'); v.srcObject = scanStream; v.setAttribute('playsinline', ''); v.muted = true;
+    await v.play().catch(() => {});
     scanTrack = scanStream.getVideoTracks()[0];
+    try { await scanTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
     const caps = scanTrack.getCapabilities ? scanTrack.getCapabilities() : {};
     $('scanTorch').style.display = caps.torch ? 'block' : 'none';
     $('scanZoom').style.display = caps.zoom && caps.zoom.max >= 2 ? 'block' : 'none';
-    scanSay('Point the camera at an implant label');
-    scanReader.decodeFromStream(scanStream, $('scanVid'), res => { if (res) scanOnRaw(res.getText()); });
-  } catch (e) { scanSay('Camera unavailable: ' + (e.message || e) + '. Allow camera access for this site in Safari settings.'); }
+  } catch (e) { scanSay('Camera unavailable: ' + (e.message || e) + '. Allow camera access for this site in Settings → Safari → Camera.'); return; }
+  scanSay('Loading barcode reader…');
+  try { await Promise.all([scanPrepWasm(), scanLoadData()]); } catch (e) { scanSay('Could not load the scanner: ' + e.message); return; }
+  scanSess = ImplantKit.createScanSession();
+  scanCtx = { gtinMap: { ...SCAN_SEED_GTIN, ...scanLearned() }, userCatalog: {} };
+  scanRender();
+  scanSay('Point at an implant label — red box = found, green = scanned');
+  scanLoopOn = true; scanLoop();
 }
 function scanStop() {
-  try { scanReader && scanReader.reset(); } catch (e) {}
+  scanLoopOn = false;
   try { scanStream && scanStream.getTracks().forEach(t => t.stop()); } catch (e) {}
-  scanReader = scanStream = scanTrack = null; scanTorchOn = false;
+  try { $('scanVid').srcObject = null; } catch (e) {}
+  scanStream = scanTrack = null; scanTorchOn = false;
+  scanDraw(null);
   $('scanModal').classList.remove('open');
 }
 $('mScan').onclick = e => { e.preventDefault(); scanOpen(); };
