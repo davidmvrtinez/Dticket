@@ -12,6 +12,7 @@
 <title>D-Ticket Generator</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="scanner.js" defer></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -108,6 +109,31 @@
   #notesWrap { display: none; margin-top: 14px; }
   #startBtns { display: flex; gap: 10px; margin-top: 12px; }
   #startBtns button { margin: 0; }
+  /* ---- implant scanner ---- */
+  #scanModal { position: fixed; inset: 0; background: #000; z-index: 120; display: none; flex-direction: column;
+               padding: calc(10px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); color: #fff; }
+  #scanModal.open { display: flex; }
+  #scanHead { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
+  #scanHead b { font-size: 17px; }
+  #scanVidWrap { position: relative; border-radius: 14px; overflow: hidden; background: #111; height: 34vh; flex: none;
+                 border: 3px solid #333; transition: border-color .15s; }
+  #scanVid { width: 100%; height: 100%; object-fit: cover; }
+  #scanVidWrap::after { content: ""; position: absolute; left: 8%; right: 8%; top: 50%; height: 2px; background: rgba(255,59,48,.8); }
+  #scanStatus { font-size: 14px; min-height: 38px; padding: 8px 2px; color: #ddd; }
+  #scanTools { display: flex; gap: 8px; }
+  #scanTools button, #scanHead button { margin: 0; width: auto; min-height: 0; padding: 9px 14px; font-size: 14px;
+                 background: #2c2c2e; color: #fff; border-radius: 10px; }
+  #scanList { flex: 1; overflow-y: auto; margin-top: 8px; }
+  .scit { background: #1c1c1e; border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; font-size: 14px; }
+  .scit .r1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .scit .r1 b { font-size: 16px; }
+  .scit small { color: #aaa; display: block; margin-top: 2px; }
+  .scit .warn { color: #ffd60a; }
+  .scit input { width: 100%; margin-top: 6px; padding: 9px 10px; border-radius: 8px; border: 1px solid #48484a;
+                background: #2c2c2e; color: #fff; font-size: 16px; }
+  .scit .qb { display: flex; align-items: center; gap: 6px; }
+  .scit .qb button { margin: 0; width: 30px; min-height: 30px; padding: 0; font-size: 18px; background: #3a3a3c; color: #fff; border-radius: 8px; }
+  #scanDone { margin-top: 8px; flex: none; }
 </style>
 </head>
 <body>
@@ -174,7 +200,9 @@
       <input type="file" id="mPatFile" accept="image/*" style="display:none">
     </div>
   </div>
-  <div class="fld"><label>Items</label><div id="mItems"></div>
+  <div class="fld"><label>Items</label>
+  <button type="button" id="mScan" style="margin:0 0 10px">&#128247; Scan implant barcodes</button>
+  <div id="mItems"></div>
   <button class="secondary" id="mAdd" style="margin-top:0">+ Add item</button></div>
   <div class="fldrow">
     <div class="fld"><label>Total (all items)</label><input id="mTotal" placeholder="$"></div>
@@ -185,6 +213,14 @@
   <button class="secondary" id="mCancel">Cancel</button>
   <div class="stsub" id="mHint" style="margin-top:10px;display:none">Editing the current d-ticket — sticker photos you already added are kept.</div>
 </div></div>
+<div id="scanModal">
+  <div id="scanHead"><b>Scan implants</b><button id="scanClose">Cancel</button></div>
+  <div id="scanVidWrap"><video id="scanVid" playsinline muted></video></div>
+  <div id="scanStatus">Starting camera…</div>
+  <div id="scanTools"><button id="scanTorch" style="display:none">Light</button><button id="scanZoom" style="display:none">Zoom 2×</button></div>
+  <div id="scanList"></div>
+  <button id="scanDone">Add to d-ticket</button>
+</div>
 <div id="cropModal">
   <div id="cropTitle">Crop the sticker</div>
   <div id="cropStage">
@@ -494,6 +530,124 @@ function mItemRow(pre) {
   });
   $("mItems").appendChild(div);
 }
+// ---- implant barcode scanner (RepTrack Implant Scanner Kit) ----
+// Labels whose barcode product id isn't in the kit's list yet (taken from David's own labels)
+const SCAN_SEED_GTIN = { '08033390354189': '9617.25.347', '03760177046542': '415-00-080' };
+const scanLearned = () => { try { return JSON.parse(localStorage.getItem('dt_gtin') || '{}'); } catch (e) { return {}; } };
+const scanLearn = (gtin, ref) => { try { const m = scanLearned(); m[gtin] = ref; localStorage.setItem('dt_gtin', JSON.stringify(m)); } catch (e) {} };
+let scanDataReady = null, scanSess = null, scanReader = null, scanStream = null, scanTrack = null, scanCtx = null, scanTorchOn = false;
+const isoToUS = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? m[2] + '/' + m[3] + '/' + m[1] : (d || ''); };
+
+function scanLoadData() {
+  if (!scanDataReady) scanDataReady = (async () => {
+    for (let i = 0; i < 50 && !window.ImplantKit; i++) await new Promise(r => setTimeout(r, 100));
+    if (!window.ImplantKit) throw new Error('scanner failed to load');
+    const [catalog, gtinMap] = await Promise.all([fetch('catalog.json').then(r => r.json()), fetch('gtinMap.json').then(r => r.json())]);
+    ImplantKit.setProductData({ catalog, gtinMap });
+  })();
+  return scanDataReady;
+}
+function scanBeep(ok) {
+  try { navigator.vibrate && navigator.vibrate(ok ? 60 : [40, 40, 40]); } catch (e) {}
+  try { const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator(), g = a.createGain();
+    o.frequency.value = ok ? 1200 : 400; g.gain.value = 0.08; o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + 0.12); } catch (e) {}
+}
+function scanFlash(color) { const w = $('scanVidWrap'); w.style.borderColor = color; setTimeout(() => w.style.borderColor = '#333', 600); }
+function scanSay(t) { $('scanStatus').textContent = t; }
+
+function scanRender() {
+  const box = $('scanList'); box.innerHTML = '';
+  if (!scanSess || !scanSess.items.length) { box.innerHTML = '<div style="color:#888;font-size:14px;padding:6px 2px">Point the camera at an implant label. The 2D (square) UDI barcode reads fastest.</div>'; return; }
+  scanSess.items.forEach(it => {
+    const d = document.createElement('div'); d.className = 'scit';
+    const need = it.status === 'needsRef' ? '<small class="warn">REF not recognized — type it below (it will be remembered)</small>'
+               : it.status === 'needsLot' ? '<small class="warn">Waiting for LOT — scan the LOT barcode or type it</small>' : '';
+    d.innerHTML = '<div class="r1"><b>' + (it.ref || 'REF ?') + '</b><span class="qb"><button data-a="-">−</button><span>' + it.qty +
+      '</span><button data-a="+">+</button><button data-a="x" style="background:#5a1d1d">✕</button></span></div>' +
+      (it.name ? '<small>' + it.name + '</small>' : '') +
+      '<small>LOT ' + (it.lot || '—') + '  ·  EXP ' + (isoToUS(it.exp) || '—') + '</small>' + need;
+    if (it.status === 'needsRef' || it.status === 'needsLot') {
+      const inp = document.createElement('input');
+      inp.placeholder = it.status === 'needsRef' ? 'Type REF' : 'Type LOT';
+      inp.addEventListener('change', () => {
+        const v = inp.value.trim(); if (!v) return;
+        if (it.status === 'needsRef') { scanSess.setRef(it.id, v, ''); if (it.pid) { scanLearn(it.pid, v); scanCtx.gtinMap[it.pid] = v; } }
+        else scanSess.updateItem(it.id, { lot: v });
+        scanRender();
+      });
+      d.appendChild(inp);
+    }
+    d.querySelectorAll('button').forEach(b => b.onclick = () => {
+      if (b.dataset.a === '+') scanSess.updateItem(it.id, { qty: it.qty + 1 });
+      else if (b.dataset.a === '-') { if (it.qty > 1) scanSess.updateItem(it.id, { qty: it.qty - 1 }); }
+      else scanSess.removeItem(it.id);
+      scanRender();
+    });
+    box.appendChild(d);
+  });
+}
+
+function scanOnRaw(raw) {
+  const now = Date.now(), ev = scanSess.handle(raw, now, scanCtx);
+  if (ev.type === 'ignored') return;
+  if (ev.type === 'added' || (ev.type === 'filled' && ev.completed)) { scanBeep(true); scanFlash('#30d158'); scanSay('✓ ' + ev.item.ref + '  LOT ' + ev.item.lot + '  EXP ' + isoToUS(ev.item.exp)); }
+  else if (ev.type === 'held' || ev.type === 'filled' || ev.type === 'waiting') { scanBeep(true); scanFlash('#ffd60a');
+    scanSay(ev.type === 'waiting' ? 'Got LOT/EXP — now scan the product barcode' : ev.item && ev.item.status === 'needsLot' ? 'Got REF — now scan the LOT barcode' : 'Scanned — REF needed, type it below'); }
+  else if (ev.type === 'duplicate') {
+    scanBeep(false); scanFlash('#ffd60a');
+    const add = confirm('Already scanned ' + ev.item.ref + ' LOT ' + ev.item.lot + '. Add another one?');
+    scanSess.resolveDuplicate(add, Date.now());
+    scanSay(add ? 'Added another ' + ev.item.ref : 'Skipped duplicate');
+  } else if (ev.type === 'unknown') { scanBeep(false); scanFlash('#ff453a'); scanSay('Barcode not recognized — try the square UDI barcode'); }
+  scanRender();
+}
+
+async function scanOpen() {
+  $('scanModal').classList.add('open');
+  scanSess = null; scanRender(); scanSay('Loading scanner…');
+  try { await scanLoadData(); } catch (e) { scanSay('Could not load the scanner: ' + e.message); return; }
+  scanSess = ImplantKit.createScanSession();
+  scanCtx = { gtinMap: { ...SCAN_SEED_GTIN, ...scanLearned() }, userCatalog: {} };
+  scanRender();
+  try {
+    const K = ImplantKit, hints = new Map();
+    hints.set(K.DecodeHintType.POSSIBLE_FORMATS, [K.BarcodeFormat.DATA_MATRIX, K.BarcodeFormat.CODE_128, K.BarcodeFormat.CODE_39,
+      K.BarcodeFormat.QR_CODE, K.BarcodeFormat.EAN_13, K.BarcodeFormat.UPC_A, K.BarcodeFormat.PDF_417, K.BarcodeFormat.AZTEC]);
+    hints.set(K.DecodeHintType.TRY_HARDER, true);
+    scanReader = new K.BrowserMultiFormatReader(hints, 250);
+    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    scanTrack = scanStream.getVideoTracks()[0];
+    const caps = scanTrack.getCapabilities ? scanTrack.getCapabilities() : {};
+    $('scanTorch').style.display = caps.torch ? 'block' : 'none';
+    $('scanZoom').style.display = caps.zoom && caps.zoom.max >= 2 ? 'block' : 'none';
+    scanSay('Point the camera at an implant label');
+    scanReader.decodeFromStream(scanStream, $('scanVid'), res => { if (res) scanOnRaw(res.getText()); });
+  } catch (e) { scanSay('Camera unavailable: ' + (e.message || e) + '. Allow camera access for this site in Safari settings.'); }
+}
+function scanStop() {
+  try { scanReader && scanReader.reset(); } catch (e) {}
+  try { scanStream && scanStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  scanReader = scanStream = scanTrack = null; scanTorchOn = false;
+  $('scanModal').classList.remove('open');
+}
+$('mScan').onclick = e => { e.preventDefault(); scanOpen(); };
+$('scanClose').onclick = scanStop;
+$('scanTorch').onclick = () => { scanTorchOn = !scanTorchOn; try { scanTrack.applyConstraints({ advanced: [{ torch: scanTorchOn }] }); } catch (e) {}
+  $('scanTorch').textContent = scanTorchOn ? 'Light on' : 'Light'; };
+$('scanZoom').onclick = () => { const z = $('scanZoom').textContent.includes('2') ? 2 : 1;
+  try { scanTrack.applyConstraints({ advanced: [{ zoom: z }] }); } catch (e) {} $('scanZoom').textContent = z === 2 ? 'Zoom 1×' : 'Zoom 2×'; };
+$('scanDone').onclick = () => {
+  const list = scanSess ? scanSess.items.slice().reverse() : [];   // oldest first = scan order
+  if (list.length) {
+    // drop the single untouched blank row the form starts with
+    const rows = document.querySelectorAll('#mItems .mitem');
+    rows.forEach(r => { if (!r.querySelector('.mi-cat').value.trim() && !r.querySelector('.mi-lot').value.trim() && !r._photo) r.remove(); });
+    list.forEach(it => mItemRow({ catalog: it.ref, lot: it.lot, expiry: isoToUS(it.exp), qty: it.qty > 1 ? String(it.qty) : '' }));
+  }
+  scanStop();
+  if (list.length) status('Added ' + list.length + ' scanned implant' + (list.length > 1 ? 's' : '') + ' — fill in prices, then Generate.');
+};
+
 let manualPatientPng = null;
 $("mPatBtn").onclick = e => { e.preventDefault(); $("mPatFile").click(); };
 $("mPatFile").addEventListener("change", async e => {
