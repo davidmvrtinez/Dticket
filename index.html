@@ -499,13 +499,27 @@ function mItemRow(pre) {
     '<div class="fldrow"><div class="fld"><label>Catalog / REF (optional with photo)</label><input class="mi-cat" value="' + (pre.catalog||"") + '"></div>' +
     '<div class="fld"><label>Lot</label><input class="mi-lot" value="' + (pre.lot||"") + '"></div></div>' +
     '<div class="fldrow"><div class="fld"><label>Expiry</label><input class="mi-exp" value="' + (pre.expiry||"") + '"></div>' +
-    '<div class="fld"><label>Qty</label><input class="mi-qty" inputmode="numeric" value="' + (pre.qty||"") + '"></div></div>' +
+    '<div class="fld"><label>Qty</label><input class="mi-qty" inputmode="numeric" value="' + (pre.qty||"1") + '"></div></div>' +
     '<div class="fldrow"><div class="fld"><label>Unit Price</label><input class="mi-pr" placeholder="$" value="' + (pre.unit_price||"") + '"></div>' +
     '<div class="fld"><label>Total Price</label><input class="mi-tp" placeholder="$" value="' + (pre.hospital_price||"") + '"></div></div>' +
+    '<div class="fld"><label>Description (no sticker? this prints large in the row instead)</label><input class="mi-desc" placeholder="e.g. Humeral stem size 2 / Instrument tray" value="' + String(pre.desc||"").replace(/"/g,"&quot;") + '"></div>' +
     '<div class="chk"><input type="checkbox" class="mi-lo"' + (pre.loaner ? " checked" : "") + '> Loaner item</div>' +
     '<div class="chk"><input type="checkbox" class="mi-wa"' + (pre.wasted ? " checked" : "") + '> Wasted (I/O)</div>' +
     '<button class="rm">Remove</button>';
-  div.querySelector(".rm").onclick = () => div.remove();
+  div.querySelector(".rm").onclick = () => { div.remove(); mRecalc(); };
+  // Total Price = Unit Price × Qty (unless you type your own total for this row)
+  const qEl = div.querySelector(".mi-qty"), pEl = div.querySelector(".mi-pr"), tEl = div.querySelector(".mi-tp");
+  div._tpManual = !!(pre.hospital_price && pre.unit_price && money(pre.unit_price) != null &&
+    money(pre.hospital_price) !== Math.round(money(pre.unit_price) * (+(pre.qty || 1) || 1) * 100) / 100);
+  const rowCalc = () => {
+    const u = money(pEl.value), q = parseFloat(qEl.value) || 1;
+    if (!div._tpManual) tEl.value = u == null ? "" : fmtMoney(u * q);
+    mRecalc();
+  };
+  qEl.addEventListener("input", rowCalc); pEl.addEventListener("input", rowCalc);
+  pEl.addEventListener("blur", () => { const u = money(pEl.value); if (u != null) pEl.value = fmtMoney(u); });
+  tEl.addEventListener("input", () => { div._tpManual = tEl.value.trim() !== ""; if (!div._tpManual) rowCalc(); else mRecalc(); });
+  tEl.addEventListener("blur", () => { const t = money(tEl.value); if (t != null) tEl.value = fmtMoney(t); });
   // carry an existing sticker photo through an edit
   if (pre.photo) {
     div._photo = pre.photo;
@@ -536,7 +550,23 @@ function mItemRow(pre) {
     } catch (err) { alert("Couldn't add that photo: " + err.message); }
   });
   $("mItems").appendChild(div);
+  if (!pre.hospital_price && pre.unit_price) rowCalc(); else mRecalc();
 }
+// ---- money helpers + automatic totals ----
+function money(v) { const t = String(v == null ? "" : v).replace(/[$,\s]/g, ""); if (!t) return null; const n = parseFloat(t); return isFinite(n) ? n : null; }
+function fmtMoney(n) { return "$" + (Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+let mTotManual = false, mGrandManual = false;
+function mRecalc() {
+  let sum = 0, any = false;
+  document.querySelectorAll("#mItems .mitem").forEach(d => { const t = money(d.querySelector(".mi-tp").value); if (t != null) { sum += t; any = true; } });
+  if (!mTotManual) $("mTotal").value = any ? fmtMoney(sum) : "";
+  const tot = money($("mTotal").value), fr = money($("mFreight").value);
+  if (!mGrandManual) $("mGrand").value = (tot == null && fr == null) ? "" : fmtMoney((tot || 0) + (fr || 0));
+}
+$("mTotal").addEventListener("input", () => { mTotManual = $("mTotal").value.trim() !== ""; mRecalc(); });
+$("mGrand").addEventListener("input", () => { mGrandManual = $("mGrand").value.trim() !== ""; if (!mGrandManual) mRecalc(); });
+$("mFreight").addEventListener("input", mRecalc);
+$("mFreight").addEventListener("blur", () => { const f = money($("mFreight").value); if (f != null) $("mFreight").value = fmtMoney(f); });
 // Sticker auto-detect. autoSticker(rgba, W, H, quads)
 //  quads: barcode corner sets [{x,y}×4] (topLeft, topRight, bottomRight, bottomLeft) of ONE label, frame coords.
 //  Returns { angle, W2, H2, rect:{x,y,w,h} } — rect is in the frame rotated by -angle about its centre
@@ -992,7 +1022,7 @@ $('scanDone').onclick = () => {
     const rows = document.querySelectorAll('#mItems .mitem');
     rows.forEach(r => { if (!r.querySelector('.mi-cat').value.trim() && !r.querySelector('.mi-lot').value.trim() && !r._photo) r.remove(); });
     list.forEach(it => { const ph = scanPhotos.get(it.id);
-      mItemRow({ catalog: it.ref, lot: it.lot, expiry: isoToUS(it.exp), qty: it.qty > 1 ? String(it.qty) : '',
+      mItemRow({ catalog: it.ref, lot: it.lot, expiry: isoToUS(it.exp), qty: String(it.qty || 1),
                  photo: ph ? ph.bytes : null, photoUrl: ph ? ph.url : '' }); });
   }
   scanStop();
@@ -1028,6 +1058,7 @@ $("manualBtn").onclick = () => {
   ["mCase","mHosp","mCode","mDate","mPo","mSurg","mPat","mNotes","mTotal","mFreight","mGrand"]
     .forEach(id => $(id).value = "");
   ["mSide","mRev","mRevP"].forEach(id => $(id).value = "");
+  mTotManual = mGrandManual = false;
   mItemRow();
   $("manualModal").classList.add("open");
 };
@@ -1069,7 +1100,10 @@ $("editBtn").onclick = () => {
   }
   // items, with their sticker photos preserved
   $("mItems").innerHTML = "";
+  mTotManual = mGrandManual = false;
   (D.items || []).forEach(it => mItemRow(it));
+  // keep totals that came from a sales order if they don't match the rows
+  $("mTotal").value = D.total || $("mTotal").value; $("mGrand").value = D.grand_total || $("mGrand").value;
   if (!(D.items || []).length) mItemRow();
   $("mHint").style.display = "block";
   $("manualModal").classList.add("open");
@@ -1081,14 +1115,15 @@ $("mGo").onclick = async () => {
   const items = [];
   document.querySelectorAll("#mItems .mitem").forEach(div => {
     const cat = div.querySelector(".mi-cat").value.trim();
-    if (!cat && !div._photo) return;   // needs a photo or a catalog #
+    const desc = div.querySelector(".mi-desc").value.trim();
+    if (!cat && !div._photo && !desc) return;   // needs a photo, catalog # or description
     const it = { catalog: cat, lot: div.querySelector(".mi-lot").value.trim(),
       expiry: div.querySelector(".mi-exp").value.trim(),
       qty: div.querySelector(".mi-qty").value.trim(),
       unit_price: div.querySelector(".mi-pr").value.trim(),
       hospital_price: div.querySelector(".mi-tp").value.trim(),
       loaner: div.querySelector(".mi-lo").checked,
-      wasted: div.querySelector(".mi-wa").checked };
+      wasted: div.querySelector(".mi-wa").checked, desc };
     if (div._photo) {
       it.photo = div._photo;
       it.photoUrl = div._photoUrl || (div.querySelector(".mi-thumb") || {}).src || "";
@@ -1570,6 +1605,18 @@ function drawGrid(d, HB, HV, itemsChunk, startIdx) {
         const iw = it.img.width * sc2, ih = it.img.height * sc2;
         d.pg.drawImage(it.img, { x: RIGHT_X + pad + 2 + (bw - iw)/2,
                                  y: y + pad + 2 + (bh - ih)/2, width: iw, height: ih });
+      } else if (it.desc) {
+        // no sticker: the typed description fills the sticker area in large text
+        const txt0 = String(it.desc).replace(/[^\x20-\x7E\u00A0-\u00FF]/g, "").replace(/\s+/g, " ").trim().toUpperCase();
+        const bw = LABEL_W - 2*pad - 12, bh = row_h - 2*pad - strip - 4;
+        const wrap = (sz) => { const words = txt0.split(" "), lines = []; let cur = "";
+          for (const w of words) { const t = cur ? cur + " " + w : w;
+            if (HB.widthOfTextAtSize(t, sz) <= bw) cur = t; else { if (cur) lines.push(cur); cur = w; } }
+          if (cur) lines.push(cur); return lines; };
+        let sz = 13, lines = wrap(sz);
+        while (sz > 6 && (lines.length * sz * 1.15 > bh || lines.some(l => HB.widthOfTextAtSize(l, sz) > bw))) { sz -= 0.5; lines = wrap(sz); }
+        const lh = sz * 1.15, cy = y + pad + 2 + bh / 2, top0 = cy + (lines.length * lh) / 2 - sz * 0.85;
+        lines.forEach((l, k) => d.ctr(l, RIGHT_X + LABEL_W / 2, top0 - k * lh, HB, sz, d.ink));
       } else {
         d.txt("PLACE STICKER BELOW", cueX, y+row_h-7.5, HB, 5.5, d.greyC);
       }
